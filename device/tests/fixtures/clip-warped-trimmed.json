@@ -1,0 +1,105 @@
+{
+  "description": "Warped clip (markers and loop in beats): refused in v1.",
+  "source": "device/probe/out/p1-clip-2.json (Live 12.4.6, Max 9.1.5, 2026-10-23); values are raw LiveAPI get results",
+  "clip": {
+    "id": 31,
+    "track_index": 0,
+    "name": [
+      "render_1"
+    ],
+    "file_path": [
+      "/path/to/render_1.wav"
+    ],
+    "is_audio_clip": [
+      1
+    ],
+    "is_arrangement_clip": [
+      1
+    ],
+    "start_marker": [
+      4
+    ],
+    "end_marker": [
+      70.16292327464203
+    ],
+    "start_time": [
+      80
+    ],
+    "end_time": [
+      112
+    ],
+    "length": [
+      32
+    ],
+    "warping": [
+      1
+    ],
+    "warp_mode": [
+      4
+    ],
+    "gain": [
+      0.4000000059604645
+    ],
+    "gain_display_string": [
+      "0.00 dB"
+    ],
+    "pitch_coarse": [
+      0
+    ],
+    "pitch_fine": [
+      0
+    ],
+    "looping": [
+      0
+    ],
+    "loop_start": [
+      4
+    ],
+    "loop_end": [
+      36
+    ],
+    "sample_length": [
+      882000
+    ],
+    "sample_rate": [
+      44100
+    ],
+    "muted": [
+      0
+    ]
+  },
+  "track": {
+    "name": [
+      "1-render_1"
+    ],
+    "has_audio_input": [
+      1
+    ],
+    "has_midi_input": [
+      0
+    ],
+    "is_frozen": [
+      0
+    ],
+    "can_be_frozen": [
+      1
+    ],
+    "is_foldable": [
+      0
+    ],
+    "is_grouped": [
+      0
+    ],
+    "mute": [
+      0
+    ],
+    "arm": [
+      0
+    ]
+  },
+  "song": {
+    "tempo": [
+      131.55548095703125
+    ]
+  }
+}

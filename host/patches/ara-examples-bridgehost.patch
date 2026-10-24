@@ -1,0 +1,454 @@
+diff --git a/ExamplesCommon/PlugInHosting/VST3Loader.cpp b/ExamplesCommon/PlugInHosting/VST3Loader.cpp
+index b513de2..c25f597 100644
+--- a/ExamplesCommon/PlugInHosting/VST3Loader.cpp
++++ b/ExamplesCommon/PlugInHosting/VST3Loader.cpp
+@@ -29,13 +29,22 @@
+ 
+ ARA_DISABLE_VST3_WARNINGS_BEGIN
+ #include "base/source/fstring.h"
++#include <atomic>   // BRIDGEHOST
+ #include "pluginterfaces/vst/ivstcomponent.h"
+ #include "pluginterfaces/vst/ivstaudioprocessor.h"
+ #include "pluginterfaces/vst/ivstprocesscontext.h"
++#include "pluginterfaces/vst/ivsteditcontroller.h"   // BRIDGEHOST
++#include "pluginterfaces/vst/ivstmessage.h"          // BRIDGEHOST
++#include "pluginterfaces/gui/iplugview.h"            // BRIDGEHOST
++#include "public.sdk/source/vst/hosting/hostclasses.h"   // BRIDGEHOST: IHostApplication implementation
+ ARA_DISABLE_VST3_WARNINGS_END
+ 
+ DEF_CLASS_IID (Steinberg::Vst::IComponent)
+ DEF_CLASS_IID (Steinberg::Vst::IAudioProcessor)
++DEF_CLASS_IID (Steinberg::Vst::IEditController)       // BRIDGEHOST
++DEF_CLASS_IID (Steinberg::Vst::IConnectionPoint)      // BRIDGEHOST
++DEF_CLASS_IID (Steinberg::Vst::IComponentHandler)     // BRIDGEHOST
++DEF_CLASS_IID (Steinberg::IPlugView)                  // BRIDGEHOST
+ DEF_CLASS_IID (ARA::IMainFactory)
+ DEF_CLASS_IID (ARA::IPlugInEntryPoint)
+ DEF_CLASS_IID (ARA::IPlugInEntryPoint2)
+@@ -100,11 +109,49 @@ struct _VST3Effect
+     IPtr<IComponent> component;
+     int32_t channelCount;
+ 
+-#if ARA_VALIDATE_API_CALLS
++    // BRIDGEHOST: binary/className always present, plus editor support
+     VST3Binary binary;
+     std::string className;
+-#endif
++    IPtr<IEditController> controller;
++    bool controllerIsSeparate { false };
++    IPtr<IPlugView> view;
++    bool offline { false };     // BRIDGEHOST: process mode, fixed at VST3StartRendering
++};
++
++// BRIDGEHOST: offline processing mode for effects started from now on (plug-ins may then wait for pending work)
++static std::atomic<bool> gVST3OfflineRendering { false };
++void VST3SetOfflineRendering (int offline) { gVST3OfflineRendering = (offline != 0); }
++
++// BRIDGEHOST: minimal IComponentHandler so the controller can talk to its host
++class BridgeComponentHandler : public IComponentHandler
++{
++public:
++    virtual ~BridgeComponentHandler () = default;
++    tresult PLUGIN_API beginEdit (ParamID) override { return kResultOk; }
++    tresult PLUGIN_API performEdit (ParamID, ParamValue) override { return kResultOk; }
++    tresult PLUGIN_API endEdit (ParamID) override { return kResultOk; }
++    tresult PLUGIN_API restartComponent (int32) override { return kResultOk; }
++    tresult PLUGIN_API queryInterface (const TUID _iid, void** obj) override
++    {
++        if (FUnknownPrivate::iidEqual (_iid, IComponentHandler::iid) || FUnknownPrivate::iidEqual (_iid, FUnknown::iid))
++        {
++            *obj = this;
++            return kResultOk;
++        }
++        *obj = nullptr;
++        return kNoInterface;
++    }
++    uint32 PLUGIN_API addRef () override { return 1; }       // lives for the whole process
++    uint32 PLUGIN_API release () override { return 1; }
+ };
++static BridgeComponentHandler gBridgeComponentHandler;
++
++// BRIDGEHOST: plug-ins such as VocAlign call into the context passed to initialize() - it must not be nullptr
++static FUnknown* bridgeHostContext ()
++{
++    static HostApplication* hostApplication { new HostApplication };
++    return static_cast<IHostApplication*> (hostApplication);
++}
+ 
+ 
+ VST3Binary VST3LoadBinary (const char* binaryName)
+@@ -270,6 +317,8 @@ const ARA::ARAFactory* VST3GetARAFactory (VST3Binary vst3Binary, const char* opt
+     return nullptr;
+ }
+ 
++static int32_t bridgeEnsureController (VST3Effect vst3Effect);   // BRIDGEHOST
++
+ VST3Effect VST3CreateEffect (VST3Binary vst3Binary, const char* optionalPlugInName)
+ {
+     for (int32 i = 0; i < vst3Binary->pluginFactory->countClasses (); ++i)
+@@ -289,13 +338,16 @@ VST3Effect VST3CreateEffect (VST3Binary vst3Binary, const char* optionalPlugInNa
+             result = vst3Binary->pluginFactory->createInstance (classInfo.cid, IComponent::iid, (void**) &component);
+             ARA_INTERNAL_ASSERT (result == kResultOk);
+             ARA_INTERNAL_ASSERT (component);
+-            result = component->initialize (nullptr);
++            result = component->initialize (bridgeHostContext ());
+             ARA_INTERNAL_ASSERT (result == kResultOk);
+-#if ARA_VALIDATE_API_CALLS
+-            return new _VST3Effect { component, 0, vst3Binary, classInfo.name };
+-#else
+-            return new _VST3Effect { component, 0 };
+-#endif
++            // BRIDGEHOST: not an aggregate in C++11 anymore, so assign members explicitly
++            _VST3Effect* effect { new _VST3Effect };
++            effect->component = component;
++            effect->channelCount = 0;
++            effect->binary = vst3Binary;
++            effect->className = classInfo.name;
++            bridgeEnsureController (effect);   // BRIDGEHOST: failure is not fatal for plug-ins without a controller
++            return effect;
+         }
+     }
+ 
+@@ -316,7 +368,8 @@ const ARA::ARAPlugInExtensionInstance* VST3BindToARADocumentController (VST3Effe
+         ARA_VALIDATE_API_CONDITION (std::strcmp (entry->getFactory ()->factoryID, araFactory->factoryID) == 0);
+ 
+     // class name must match plug-in name in factory
+-    ARA_VALIDATE_API_CONDITION (std::strcmp (entry->getFactory ()->plugInName, vst3Effect->className.c_str ()) == 0);
++    // BRIDGEHOST: VocAlign's factory name differs from its VST3 class name, so this check is relaxed
++    // ARA_VALIDATE_API_CONDITION (std::strcmp (entry->getFactory ()->plugInName, vst3Effect->className.c_str ()) == 0);
+ #endif
+ 
+     constexpr ARA::ARAPlugInInstanceRoleFlags knownRoles { ARA::kARAPlaybackRendererRole | ARA::kARAEditorRendererRole | ARA::kARAEditorViewRole };
+@@ -344,7 +397,8 @@ void VST3StartRendering (VST3Effect vst3Effect, int32_t channelCount, int32_t ma
+     ARA_INTERNAL_ASSERT (vst3Effect->channelCount == 0);
+     vst3Effect->channelCount = channelCount;
+ 
+-    ProcessSetup setup = { kRealtime, kSample32, maxBlockSize, sampleRate };
++    vst3Effect->offline = gVST3OfflineRendering;   // BRIDGEHOST
++    ProcessSetup setup = { vst3Effect->offline ? kOffline : kRealtime, kSample32, maxBlockSize, sampleRate };   // BRIDGEHOST
+     tresult ARA_MAYBE_UNUSED_VAR (result);
+     result = processor->setupProcessing (setup);
+     ARA_INTERNAL_ASSERT (result == kResultOk);
+@@ -407,7 +461,7 @@ void VST3RenderBuffer (VST3Effect vst3Effect, int32_t blockSize, double sampleRa
+     context.projectTimeSamples = samplePosition;
+ 
+     ProcessData data;
+-    data.processMode = kRealtime;
++    data.processMode = vst3Effect->offline ? kOffline : kRealtime;   // BRIDGEHOST
+     data.symbolicSampleSize = kSample32;
+     data.numSamples = blockSize;
+     data.numInputs = 1;
+@@ -421,6 +475,13 @@ void VST3RenderBuffer (VST3Effect vst3Effect, int32_t blockSize, double sampleRa
+     ARA_INTERNAL_ASSERT (result == kResultOk);
+ }
+ 
++// BRIDGEHOST: latency the plug-in reports (a host is supposed to compensate for it)
++int32_t VST3GetLatencySamples (VST3Effect vst3Effect)
++{
++    FUnknownPtr<IAudioProcessor> processor { vst3Effect->component };
++    return processor ? static_cast<int32_t> (processor->getLatencySamples ()) : -1;
++}
++
+ void VST3StopRendering (VST3Effect vst3Effect)
+ {
+     ARA_INTERNAL_ASSERT (vst3Effect->channelCount != 0);
+@@ -437,8 +498,96 @@ void VST3StopRendering (VST3Effect vst3Effect)
+     vst3Effect->channelCount = 0;
+ }
+ 
++// BRIDGEHOST: create the edit controller half of the effect and connect it to the component (idempotent).
++// Done at creation time because some ARA plug-ins (VocAlign) expect it to exist when binding to the document.
++static int32_t bridgeEnsureController (VST3Effect vst3Effect)
++{
++    if (vst3Effect->controller)
++        return 0;
++
++    IPtr<IEditController> controller;
++    if ((vst3Effect->component->queryInterface (IEditController::iid, (void**) &controller) != kResultOk) || !controller)
++    {
++        TUID controllerClassID;
++        if (vst3Effect->component->getControllerClassId (controllerClassID) != kResultOk)
++            return 1;
++        if ((vst3Effect->binary->pluginFactory->createInstance (controllerClassID, IEditController::iid, (void**) &controller) != kResultOk) || !controller)
++            return 2;
++        if (controller->initialize (bridgeHostContext ()) != kResultOk)
++            return 3;
++        vst3Effect->controllerIsSeparate = true;
++
++        FUnknownPtr<IConnectionPoint> componentPoint { vst3Effect->component };
++        FUnknownPtr<IConnectionPoint> controllerPoint { controller };
++        if (componentPoint && controllerPoint)
++        {
++            componentPoint->connect (controllerPoint);
++            controllerPoint->connect (componentPoint);
++        }
++    }
++    controller->setComponentHandler (&gBridgeComponentHandler);
++    vst3Effect->controller = controller;
++    return 0;
++}
++
++// BRIDGEHOST: create the edit controller (if needed) and attach its editor view to the given NSView.
++// returns 0 on success, nonzero error code otherwise.
++int32_t VST3AttachEditor (VST3Effect vst3Effect, void* nsView, int32_t* width, int32_t* height)
++{
++    if (const int32_t error { bridgeEnsureController (vst3Effect) })
++        return error;
++
++    IPtr<IPlugView> view { vst3Effect->controller->createView (ViewType::kEditor), false };
++    if (!view)
++        return 4;
++    if (view->isPlatformTypeSupported (kPlatformTypeNSView) != kResultTrue)
++        return 5;
++    ViewRect rect {};
++    view->getSize (&rect);
++    if (width)
++        *width = rect.right - rect.left;
++    if (height)
++        *height = rect.bottom - rect.top;
++    if (view->attached (nsView, kPlatformTypeNSView) != kResultOk)
++        return 6;
++    vst3Effect->view = view;
++    return 0;
++}
++
++// BRIDGEHOST: tell the editor view its new size (in points)
++void VST3ResizeEditor (VST3Effect vst3Effect, int32_t width, int32_t height)
++{
++    if (vst3Effect->view)
++    {
++        ViewRect rect (0, 0, width, height);
++        vst3Effect->view->onSize (&rect);
++    }
++}
++
+ void VST3DestroyEffect (VST3Effect vst3Effect)
+ {
++    if (vst3Effect->view)       // BRIDGEHOST
++    {
++        vst3Effect->view->removed ();
++        vst3Effect->view = nullptr;
++    }
++    if (vst3Effect->controller)
++    {
++        // BRIDGEHOST: undo what bridgeEnsureController set up, in reverse order, before terminating
++        vst3Effect->controller->setComponentHandler (nullptr);
++        if (vst3Effect->controllerIsSeparate)
++        {
++            FUnknownPtr<IConnectionPoint> componentPoint { vst3Effect->component };
++            FUnknownPtr<IConnectionPoint> controllerPoint { vst3Effect->controller };
++            if (componentPoint && controllerPoint)
++            {
++                componentPoint->disconnect (controllerPoint);
++                controllerPoint->disconnect (componentPoint);
++            }
++            vst3Effect->controller->terminate ();
++        }
++        vst3Effect->controller = nullptr;
++    }
+     tresult ARA_MAYBE_UNUSED_VAR (result);
+     result = vst3Effect->component->terminate ();
+     ARA_INTERNAL_ASSERT (result == kResultOk);
+diff --git a/ExamplesCommon/PlugInHosting/VST3Loader.h b/ExamplesCommon/PlugInHosting/VST3Loader.h
+index 5771ebf..0320a87 100644
+--- a/ExamplesCommon/PlugInHosting/VST3Loader.h
++++ b/ExamplesCommon/PlugInHosting/VST3Loader.h
+@@ -39,6 +39,11 @@ void VST3StartRendering(VST3Effect vst3Effect, int32_t channelCount, int32_t max
+ void VST3RenderBuffer(VST3Effect vst3Effect, int32_t blockSize, double sampleRate, int64_t samplePosition, float ** buffers);
+ void VST3StopRendering(VST3Effect vst3Effect);
+ void VST3DestroyEffect(VST3Effect vst3Effect);
++// BRIDGEHOST: additions
++int32_t VST3AttachEditor(VST3Effect vst3Effect, void * nsView, int32_t * width, int32_t * height);
++void VST3SetOfflineRendering(int offline);
++int32_t VST3GetLatencySamples(VST3Effect vst3Effect);
++void VST3ResizeEditor(VST3Effect vst3Effect, int32_t width, int32_t height);
+ void VST3UnloadBinary(VST3Binary vst3Binary);
+ 
+ #if defined(__cplusplus)
+diff --git a/TestHost/ARADocumentController.cpp b/TestHost/ARADocumentController.cpp
+index ca156f5..ee60ab0 100644
+--- a/TestHost/ARADocumentController.cpp
++++ b/TestHost/ARADocumentController.cpp
+@@ -380,6 +380,20 @@ void ARADocumentController::getPlaybackRegionHeadAndTailTime (PlaybackRegion* pl
+     _documentController->getPlaybackRegionHeadAndTailTime (getRef (playbackRegion), headTime, tailTime);
+ }
+ 
++// BRIDGEHOST
++void ARADocumentController::notifyModelUpdates ()
++{
++    if (_isEditingDocument)
++        return;
++#if ARA_VALIDATE_API_CALLS
++    _isPollingModelUpdates = true;
++#endif
++    _documentController->notifyModelUpdates ();
++#if ARA_VALIDATE_API_CALLS
++    _isPollingModelUpdates = false;
++#endif
++}
++
+ void ARADocumentController::requestAudioSourceContentAnalysis (AudioSource* audioSource, size_t contentTypesCount, const ARA::ARAContentType contentTypes[], bool bWaitUntilFinish)
+ {
+     // check license first without opening UI
+diff --git a/TestHost/ARADocumentController.h b/TestHost/ARADocumentController.h
+index 6a35a27..8eefe48 100644
+--- a/TestHost/ARADocumentController.h
++++ b/TestHost/ARADocumentController.h
+@@ -33,6 +33,7 @@
+ #include "ModelObjects.h"
+ #include "CompanionAPIs.h"
+ 
++#include <atomic>   // BRIDGEHOST
+ #include <map>
+ #include <thread>
+ 
+@@ -62,6 +63,18 @@ class ARAContentAccessController;
+ class ARAModelUpdateController;
+ class ARAPlaybackController;
+ 
++// BRIDGEHOST: receives the plug-in's transport requests (ARA playback controller interface), on any thread but a render thread
++class PlaybackRequestHandler
++{
++public:
++    virtual ~PlaybackRequestHandler () = default;
++    virtual void requestStartPlayback () = 0;
++    virtual void requestStopPlayback () = 0;
++    virtual void requestSetPlaybackPosition (double timePosition) = 0;
++    virtual void requestSetCycleRange (double /*startTime*/, double /*duration*/) {}
++    virtual void requestEnableCycle (bool /*enable*/) {}
++};
++
+ /*******************************************************************************/
+ // Our test host document controller class.
+ // This function creates a plug-in side document and controller and
+@@ -124,6 +137,20 @@ public:
+     bool supportsStoringAudioFileChunks ();
+     bool storeAudioSourceToAudioFileChunk (ArchiveBase* archive, AudioSource* audioSource, ARA::ARAPersistentID* documentArchiveID, bool* openAutomatically);
+ 
++    /*******************************************************************************/
++    // BRIDGEHOST: lets the plug-in send model updates (analysis progress, content changes); a host must call
++    // this periodically on the document's thread while it is not editing the document. Does nothing while
++    // an edit cycle is open.
++    void notifyModelUpdates ();
++
++    // BRIDGEHOST: where the plug-in's transport requests go (nullptr: they are only logged). The plug-in may
++    // send them from any thread but a render thread, so the handler must stay valid for as long as the
++    // plug-in can call (the host keeps it alive) and do its own thread hand-over.
++    void setPlaybackRequestHandler (PlaybackRequestHandler* handler) noexcept { _playbackRequestHandler.store (handler); }
++    PlaybackRequestHandler* getPlaybackRequestHandler () const noexcept { return _playbackRequestHandler.load (); }
++    // BRIDGEHOST, test only: the host interface the plug-in calls for transport requests
++    ARA::Host::PlaybackControllerInterface* getPlaybackControllerForTests () const noexcept { return _documentControllerHostInstance.getPlaybackController (); }
++
+     /*******************************************************************************/
+     // Functions to enable audio source access and read head/tail time
+ 
+@@ -208,6 +235,8 @@ private:
+     // for debugging only, see isUsingArchive ()
+     const ArchiveBase* _currentArchive { nullptr };
+ 
++    std::atomic<PlaybackRequestHandler*> _playbackRequestHandler { nullptr };   // BRIDGEHOST
++
+ #if ARA_VALIDATE_API_CALLS
+     bool _isPollingModelUpdates { false };
+     std::thread::id _creationThreadID;
+diff --git a/TestHost/ARAHostInterfaces/ARAPlaybackController.cpp b/TestHost/ARAHostInterfaces/ARAPlaybackController.cpp
+index 573d3d4..bdab94f 100644
+--- a/TestHost/ARAHostInterfaces/ARAPlaybackController.cpp
++++ b/TestHost/ARAHostInterfaces/ARAPlaybackController.cpp
+@@ -27,30 +27,40 @@
+ 
+ void ARAPlaybackController::requestStartPlayback () noexcept
+ {
+-    ARA_VALIDATE_API_THREAD (_araDocumentController->wasCreatedOnCurrentThread ());
++    // BRIDGEHOST: the ARA API allows these calls from any thread except render threads (no thread check)
++    if (auto handler { _araDocumentController->getPlaybackRequestHandler () })   // BRIDGEHOST
++        return handler->requestStartPlayback ();
+     ARA_WARN ("requestStartPlayback () not implemented.");
+ }
+ 
+ void ARAPlaybackController::requestStopPlayback () noexcept
+ {
+-    ARA_VALIDATE_API_THREAD (_araDocumentController->wasCreatedOnCurrentThread ());
++    // BRIDGEHOST: the ARA API allows these calls from any thread except render threads (no thread check)
++    if (auto handler { _araDocumentController->getPlaybackRequestHandler () })   // BRIDGEHOST
++        return handler->requestStopPlayback ();
+     ARA_WARN ("requestStopPlayback () not implemented");
+ }
+ 
+ void ARAPlaybackController::requestSetPlaybackPosition (ARA::ARATimePosition timePosition) noexcept
+ {
+-    ARA_VALIDATE_API_THREAD (_araDocumentController->wasCreatedOnCurrentThread ());
++    // BRIDGEHOST: the ARA API allows these calls from any thread except render threads (no thread check)
++    if (auto handler { _araDocumentController->getPlaybackRequestHandler () })   // BRIDGEHOST
++        return handler->requestSetPlaybackPosition (timePosition);
+     ARA_WARN ("requestSetPlaybackPosition () not implemented, requested time is %.2f", timePosition);
+ }
+ 
+ void ARAPlaybackController::requestSetCycleRange (ARA::ARATimePosition startTime, ARA::ARATimeDuration duration) noexcept
+ {
+-    ARA_VALIDATE_API_THREAD (_araDocumentController->wasCreatedOnCurrentThread ());
++    // BRIDGEHOST: the ARA API allows these calls from any thread except render threads (no thread check)
++    if (auto handler { _araDocumentController->getPlaybackRequestHandler () })   // BRIDGEHOST
++        return handler->requestSetCycleRange (startTime, duration);
+     ARA_WARN ("requestSetCycleRange () not implemented, requested range is %.2f to %.2f", startTime, startTime + duration);
+ }
+ 
+ void ARAPlaybackController::requestEnableCycle (bool enable) noexcept
+ {
+-    ARA_VALIDATE_API_THREAD (_araDocumentController->wasCreatedOnCurrentThread ());
++    // BRIDGEHOST: the ARA API allows these calls from any thread except render threads (no thread check)
++    if (auto handler { _araDocumentController->getPlaybackRequestHandler () })   // BRIDGEHOST
++        return handler->requestEnableCycle (enable);
+     ARA_WARN ("requestEnableCycle () not implemented, requested to turn %s.", enable ? "on" : "off");
+ }
+diff --git a/TestHost/CompanionAPIs.cpp b/TestHost/CompanionAPIs.cpp
+index bef8658..c396ed5 100644
+--- a/TestHost/CompanionAPIs.cpp
++++ b/TestHost/CompanionAPIs.cpp
+@@ -254,6 +254,20 @@ public:
+         VST3StopRendering (_vst3Effect);
+     }
+ 
++    // BRIDGEHOST
++    int getLatencySamples () override { return VST3GetLatencySamples (_vst3Effect); }
++    void resizeEditor (int width, int height) override { VST3ResizeEditor (_vst3Effect, width, height); }
++
++    // BRIDGEHOST
++    int attachEditor (void* nativeView, int& width, int& height) override
++    {
++        int32_t w { 0 }, h { 0 };
++        const int32_t result { VST3AttachEditor (_vst3Effect, nativeView, &w, &h) };
++        width = w;
++        height = h;
++        return result;
++    }
++
+ private:
+     VST3Effect const _vst3Effect;
+     double _sampleRate { 44100.0 };
+@@ -905,7 +919,8 @@ void PlugInEntry::validateAndSetFactory (const ARA::ARAFactory* factory)
+     ARA_VALIDATE_API_CONDITION (factory->structSize >= ARA::kARAFactoryMinSize);
+ 
+ #if ARA_CPU_ARM
+-    ARA_VALIDATE_API_CONDITION (factory->lowestSupportedApiGeneration >= ARA::kARAAPIGeneration_2_0_Final);
++    // BRIDGEHOST: relaxed so plug-ins declaring an older minimum API generation can be loaded
++    ARA_VALIDATE_API_CONDITION (true);
+ #else
+     ARA_VALIDATE_API_CONDITION (factory->lowestSupportedApiGeneration >= ARA::kARAAPIGeneration_1_0_Draft);
+ #endif
+diff --git a/TestHost/CompanionAPIs.h b/TestHost/CompanionAPIs.h
+index e6195f1..ede28f8 100644
+--- a/TestHost/CompanionAPIs.h
++++ b/TestHost/CompanionAPIs.h
+@@ -55,6 +55,11 @@ public:
+     virtual void renderSamples (int blockSize, int64_t samplePosition, float** buffers) = 0;
+     virtual void stopRendering () = 0;
+ 
++    // BRIDGEHOST: attach the plug-in's editor view to a native view (NSView*), returns 0 on success
++    virtual int attachEditor (void* /*nativeView*/, int& /*width*/, int& /*height*/) { return -1; }
++    virtual int getLatencySamples () { return -1; }   // BRIDGEHOST
++    virtual void resizeEditor (int /*width*/, int /*height*/) {}   // BRIDGEHOST
++
+     // Getters for ARA specific plug-in role interfaces
+     ARA::Host::PlaybackRenderer getPlaybackRenderer () { return ARA::Host::PlaybackRenderer { _instance }; }
+     ARA::Host::EditorRenderer getEditorRenderer () { return ARA::Host::EditorRenderer { _instance }; }

@@ -1,0 +1,105 @@
+{
+  "description": "Unwarped untouched clip: whole 20 s file, start_marker/loop_start are the string 7.1e-15.",
+  "source": "device/probe/out/p1-clip-3.json (Live 12.4.6, Max 9.1.5, 2026-10-23); values are raw LiveAPI get results",
+  "clip": {
+    "id": 32,
+    "track_index": 0,
+    "name": [
+      "render_1"
+    ],
+    "file_path": [
+      "/path/to/render_1.wav"
+    ],
+    "is_audio_clip": [
+      1
+    ],
+    "is_arrangement_clip": [
+      1
+    ],
+    "start_marker": [
+      "7.105427357601002e-15"
+    ],
+    "end_marker": [
+      32
+    ],
+    "start_time": [
+      128
+    ],
+    "end_time": [
+      171.85182707917082
+    ],
+    "length": [
+      43.85182707917082
+    ],
+    "warping": [
+      0
+    ],
+    "warp_mode": [
+      4
+    ],
+    "gain": [
+      0.4000000059604645
+    ],
+    "gain_display_string": [
+      "0.00 dB"
+    ],
+    "pitch_coarse": [
+      0
+    ],
+    "pitch_fine": [
+      0
+    ],
+    "looping": [
+      0
+    ],
+    "loop_start": [
+      "7.105427357601002e-15"
+    ],
+    "loop_end": [
+      20
+    ],
+    "sample_length": [
+      882000
+    ],
+    "sample_rate": [
+      44100
+    ],
+    "muted": [
+      0
+    ]
+  },
+  "track": {
+    "name": [
+      "1-render_1"
+    ],
+    "has_audio_input": [
+      1
+    ],
+    "has_midi_input": [
+      0
+    ],
+    "is_frozen": [
+      0
+    ],
+    "can_be_frozen": [
+      1
+    ],
+    "is_foldable": [
+      0
+    ],
+    "is_grouped": [
+      0
+    ],
+    "mute": [
+      0
+    ],
+    "arm": [
+      0
+    ]
+  },
+  "song": {
+    "tempo": [
+      131.55548095703125
+    ]
+  }
+}
