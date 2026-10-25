@@ -1,8 +1,8 @@
-# ARA2 Bridge 4 Live – Testversion
+# ARA2 Bridge 4 Live – v0.1
 
 Mit diesem Max-for-Live-Gerät schickst Du einen Audio-Clip aus der **Arrangement-Ansicht** von Ableton Live an **Melodyne** oder **VocAlign**, bearbeitest ihn dort in einem eigenen Fenster (mit Wiedergabe) und bekommst das Ergebnis mit **Apply** zurück in Dein Projekt. Live selbst unterstützt ARA2 nicht; ein kleines Hilfsprogramm („BridgeHost“) übernimmt das Hosten der Plug-ins.
 
-Das ist eine Testversion für einen kleinen Kreis. Bitte Fehler und Auffälligkeiten melden (siehe ganz unten, „Was ich von Dir brauche“).
+Das ist eine frühe Version (v0.1). Bitte Fehler und Auffälligkeiten als GitHub-Issue melden (siehe ganz unten, „Probleme melden“).
 
 ## Was Du brauchst
 
@@ -17,12 +17,12 @@ Die Plug-ins und ihre Lizenzen bringst Du selbst mit. In diesem Paket sind **kei
 
 ## Installation
 
-1. ZIP-Datei entpacken (Doppelklick). Es entsteht der Ordner `ARABridge-Test`.
+1. ZIP-Datei entpacken (Doppelklick). Es entsteht der Ordner `ARA2-Bridge-4-Live`.
 2. **Terminal** öffnen (Spotlight: „Terminal“).
 3. Im Terminal `bash ` eingeben (mit Leerzeichen am Ende), dann die Datei **`install.sh`** aus dem Ordner ins Terminal-Fenster ziehen und Enter drücken. Das sieht dann ungefähr so aus:
 
    ```
-   bash /Users/DEINNAME/Downloads/ARABridge-Test/install.sh
+   bash /Users/DEINNAME/Downloads/ARA2-Bridge-4-Live/install.sh
    ```
 
 4. Das Skript macht vier Schritte und schreibt sie mit. Am Ende steht „Fertig.“ Wichtig ist die Zeile bei „Plug-ins suchen“: Dort muss bei den Plug-ins, die Du nutzen willst, `"found": true` stehen. Wenn dort `false` steht, ist das Plug-in nicht als VST3 an der üblichen Stelle installiert (siehe „Probleme“).
@@ -64,7 +64,7 @@ Alles lässt sich mit Rückgängig (Cmd+Z) zurücknehmen.
 2. Das Melodyne-Fenster öffnet sich vorne. Mit der **Leertaste** spielst Du ab. Hörst Du nichts, wähle im Fenster im Menü **Output** Deine Audio-Schnittstelle.
 3. Bearbeiten wie gewohnt, dann im Fenster **Apply to Live** drücken. Das Fenster schließt sich, das Ergebnis erscheint im Arrangement. Mit **Cancel** brichst Du ab.
 
-Der Schalter **Skip timing correction** ist normalerweise aus. Melodyne verschiebt den Rest des Clips nach einer Bearbeitung um Bruchteile von Millisekunden; das Gerät gleicht das aus. Wenn das Ergebnis trotzdem knistert oder anders klingt als im Melodyne-Fenster, schalte den Schalter ein und wiederhole den Vorgang, und sag mir Bescheid.
+Der Schalter **Skip timing correction** ist normalerweise aus. Melodyne verschiebt den Rest des Clips nach einer Bearbeitung um Bruchteile von Millisekunden; das Gerät gleicht das aus. Wenn das Ergebnis trotzdem knistert oder anders klingt als im Melodyne-Fenster, schalte den Schalter ein und wiederhole den Vorgang, und melde es.
 
 ### VocAlign
 
@@ -106,14 +106,14 @@ Protokolle (bitte bei Fehlern mitschicken):
 
 Im Finder: Menü **Gehe zu → Gehe zum Ordner…**, dann `~/Library/Application Support/ARABridge` einfügen.
 
-## Was ich von Dir brauche
+## Probleme melden
 
-Eine kurze Rückmeldung zu diesen Punkten:
+Eröffne ein Issue auf der Projektseite (https://github.com/Enableton/ara2-bridge-4-live/issues) und schreibe dazu:
 
-1. Hat die Installation geklappt? (Ausgabe von `install.sh` bei Schwierigkeiten kopieren.)
+1. Ob die Installation geklappt hat (wenn nicht: die Ausgabe von `install.sh`).
 2. Mac-Modell, macOS-Version, Live-Version, Melodyne-/VocAlign-Version.
-3. Melodyne: eine Note ändern und Apply. Passt Länge und Klang, knistert etwas?
-4. VocAlign (falls vorhanden): Guide und Dub, Ergebnis am Guide-Anfang?
+3. Was Du gemacht hast (Melodyne oder VocAlign, welcher Placement-Modus) und was passiert ist, zum Beispiel Knistern oder falsche Länge.
+4. Bei VocAlign: ob das Ergebnis am Guide-Anfang beginnt.
 5. Bei Fehlern: Text der Statuszeile und die Protokolle von oben.
 
 ## Lizenzen und Quellcode

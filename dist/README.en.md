@@ -1,8 +1,8 @@
-# ARA2 Bridge 4 Live – test version
+# ARA2 Bridge 4 Live – v0.1
 
 This Max for Live device sends an audio clip from Ableton Live's **Arrangement View** to **Melodyne** or **VocAlign**, lets you edit it there in its own window (with playback), and puts the result back into your project when you press **Apply**. Live does not support ARA2 itself; a small helper program ("BridgeHost") hosts the plug-ins.
 
-This is a test version for a small group. Please report errors and oddities (see "What I need from you" at the bottom).
+This is an early version (v0.1). Please report errors and oddities as a GitHub issue (see "Reporting problems" at the bottom).
 
 ## What you need
 
@@ -17,12 +17,12 @@ You bring the plug-ins and their licenses yourself. This package contains **no**
 
 ## Installation
 
-1. Unzip the ZIP file (double-click). This creates the folder `ARABridge-Test`.
+1. Unzip the ZIP file (double-click). This creates the folder `ARA2-Bridge-4-Live`.
 2. Open **Terminal** (Spotlight: "Terminal").
 3. Type `bash ` in Terminal (with a space at the end), then drag the file **`install.sh`** from the folder into the Terminal window and press Enter. It looks roughly like this:
 
    ```
-   bash /Users/YOURNAME/Downloads/ARABridge-Test/install.sh
+   bash /Users/YOURNAME/Downloads/ARA2-Bridge-4-Live/install.sh
    ```
 
 4. The script runs four steps and prints them. At the end it says "Fertig." (German for "Done."). The important line is the one under "Plug-ins suchen" (searching for plug-ins): for each plug-in you want to use it must say `"found": true`. If it says `false`, the plug-in is not installed as VST3 in the usual place (see "Problems").
@@ -62,7 +62,7 @@ Everything can be undone with Undo (Cmd+Z).
 2. The Melodyne window opens in front. Press the **space bar** to play. If you hear nothing, choose your audio interface in the window's **Output** menu.
 3. Edit as usual, then press **Apply to Live** in the window. The window closes and the result appears in the Arrangement. **Cancel** aborts.
 
-The **Skip timing correction** switch is normally off. After an edit Melodyne shifts the rest of the clip by fractions of a millisecond; the device compensates for that. If the result still crackles or sounds different from the Melodyne window, switch it on, repeat the process, and tell me.
+The **Skip timing correction** switch is normally off. After an edit Melodyne shifts the rest of the clip by fractions of a millisecond; the device compensates for that. If the result still crackles or sounds different from the Melodyne window, switch it on, repeat the process, and report it.
 
 ### VocAlign
 
@@ -104,14 +104,14 @@ Logs (please send them along with error reports):
 
 In Finder: menu **Go → Go to Folder…**, then paste `~/Library/Application Support/ARABridge`.
 
-## What I need from you
+## Reporting problems
 
-A short reply on these points:
+Open an issue on the project page (https://github.com/Enableton/ara2-bridge-4-live/issues) and include:
 
-1. Did the installation work? (If it did not, copy the output of `install.sh`.)
+1. Whether the installation worked (if not, the output of `install.sh`).
 2. Mac model, macOS version, Live version, Melodyne / VocAlign version.
-3. Melodyne: change one note and press Apply. Do length and sound match, is there any crackle?
-4. VocAlign (if you have it): guide and dub, does the result start at the guide's start?
+3. What you did (Melodyne or VocAlign, which placement mode) and what happened, for example a crackle or a wrong length.
+4. For VocAlign: whether the result starts at the guide's start.
 5. For errors: the text of the status line and the logs from above.
 
 ## Licenses and source code

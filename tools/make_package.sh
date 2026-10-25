@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the test package for another Mac: build/package/ARABridge-Test.zip (see dist/README.md).
+# Builds the install package for another Mac: build/package/ARA2-Bridge-4-Live.zip (see dist/README.md).
 #   tools/make_package.sh             # needs a clean git tree: the package contains the committed source
 #   ALLOW_DIRTY=1 tools/make_package.sh
 # Steps: BridgeHost for macOS 12+ (own build folder next to the normal one), the device for the fixed install path
@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TP="${ARABRIDGE_THIRD_PARTY:-$ROOT/third_party}"
 OUT="$ROOT/build/package"
-NAME="ARABridge-Test"
+NAME="ARA2-Bridge-4-Live"
 PKG="$OUT/$NAME"
 INSTALL_ROOT="/Users/Shared/ARABridge/device"
 

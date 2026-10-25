@@ -96,7 +96,7 @@ says `Ready.` plus the plug-ins it found. Full instructions, the status messages
 
 ## Sharing a build with a friend
 
-`tools/make_package.sh` builds `build/package/ARABridge-Test.zip`: the host (built for macOS 12+), the device pointing
+`tools/make_package.sh` builds `build/package/ARA2-Bridge-4-Live.zip`: the host (built for macOS 12+), the device pointing
 at `/Users/Shared/ARABridge/device`, an `install.sh`, the source, the licenses and READMEs in German and English
 (`dist/`). The recipient needs no developer tools. The binary is not notarized, so only share it with people you trust;
 `install.sh` removes the download quarantine mark for them.
