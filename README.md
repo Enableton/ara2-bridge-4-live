@@ -1,3 +1,5 @@
+![ARA2 Bridge 4 Live: Melodyne and VocAlign inside Ableton Live](docs/images/banner.png)
+
 # ARA2 Bridge 4 Live
 
 Use **Melodyne** and **VocAlign** (ARA2 plug-ins) with **Ableton Live**, which has no ARA2 support of its own.
