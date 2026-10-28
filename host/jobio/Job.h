@@ -42,6 +42,9 @@ namespace bridge
         // not from job.json (loadJob never sets it): settings.json's "keepRaw" (loadKeepRaw), set by the host
         // after loading; keeps the raw renders and the realignment's details in the job folder
         bool keepRaw { false };
+        // not from job.json: false for a live preview (hostcore/ApplyJob.h, writePreview): result.wav is not flushed to disk
+        // before it is renamed into place (it is only played, never relied on after a crash)
+        bool durable { true };
     };
 
     // result.json. The device must treat it as authoritative, not BridgeHost's exit code: a crash or hang while

@@ -1784,7 +1784,7 @@ test('guide.json and device.log are pure ASCII; a long umlaut/emoji name and pat
 });
 
 // ---- integration: real runner + real BridgeHost --autorender, placement on the fake Live
-// ---- Live preview
+// ---- Live preview (two Preview tracks A and B take turns; the source clip is muted while a preview exists)
 function previewFixture(o) {
   o = o || {};
   const fx = makeFixture(o);
@@ -1796,7 +1796,8 @@ function previewFixture(o) {
   fx.launch = fx.runner.launches[0];
   return fx;
 }
-const previewTrackOf = (fx) => fx.live.tracks().filter((t) => fx.initialTrackIds.indexOf(t.id) < 0);
+const previewTracksOf = (fx) => fx.live.tracks().filter((t) => fx.initialTrackIds.indexOf(t.id) < 0);
+const srcMuted = (fx) => fx.clip.props.muted;
 function previewClipOk(fx, track, n) {
   const c = fx.live.liveClips(track);
   assert.strictEqual(c.length, 1, 'one clip on the Preview track');
@@ -1805,102 +1806,122 @@ function previewClipOk(fx, track, n) {
   assert.strictEqual(p.looping, 0);
   near(p.start_time, 16, 1e-9, 'at the source clip\'s position');
   near(p.length * 60 / fx.live.song.tempo, 4, 0.002, 'as long as the source region');
-  assert.strictEqual(p.name, 'Vocal take (preview)');
   near(p.gain, 0.5, 1e-9, 'gain copied');
   assert.ok(p.file_path.endsWith('/preview-' + n + '/result.wav'), 'plays the host\'s preview file: ' + p.file_path);
 }
+// exactly one Preview track is audible; its clip is preview n
+function audible(fx, n) {
+  const pt = previewTracksOf(fx);
+  const open = pt.filter((t) => t.props.mute === 0);
+  assert.strictEqual(open.length, 1, 'one audible Preview track: ' + pt.map((t) => t.name + ' mute=' + t.props.mute).join(', '));
+  previewClipOk(fx, open[0], n);
+  pt.filter((t) => t !== open[0]).forEach((t) => { assert.strictEqual(t.props.mute, 1, t.name + ' is silent'); assert.strictEqual(fx.live.liveClips(t).length, 0, t.name + ' holds no clip'); });
+  return open[0];
+}
 
-test('live preview: the job asks for it; the first preview makes a Preview track below the source, the next replaces its clip', () => {
+test('live preview: the job asks for it; A, then B, then A again: the new clip goes onto the silent track, then the tracks swap', () => {
   const fx = previewFixture();
   invariants(fx);
   assert.strictEqual(fx.launch.job.preview, true);
   assert.ok(/live preview: on/.test(fx.statuses().filter((x) => /Melodyne is open/.test(x))[0]), 'the open line says so');
+  assert.strictEqual(srcMuted(fx), 0, 'nothing is muted before the first preview');
   fx.runner.preview();
   fx.pump();
   let tracks = fx.live.tracks();
   assert.strictEqual(tracks.length, 3);
   assert.strictEqual(tracks[0], fx.t0); assert.strictEqual(tracks[2], fx.t1);
-  const pt = tracks[1];
-  assert.strictEqual(pt.name, 'Preview: Vocal take');
-  previewClipOk(fx, pt, 1);
-  assert.ok(/^Preview 1 is on the Preview track\. Mute the original track to compare\.$/.test(fx.status()), fx.status());
-  const firstClip = fx.live.liveClips(pt)[0].id;
-  assert.deepStrictEqual(fx.live.snapshot()[0], fx.initial[0], 'the user\'s track is untouched');
+  const a = tracks[1];
+  assert.strictEqual(a.name, 'Preview A: Vocal take');
+  assert.strictEqual(audible(fx, 1), a);
+  assert.strictEqual(fx.live.liveClips(a)[0].props.name, 'Vocal take (preview)');
+  assert.strictEqual(srcMuted(fx), 1, 'the original clip (not its track) is muted while a preview plays');
+  assert.strictEqual(fx.t0.props.mute, 0, 'the user\'s track is not muted');
+  assert.ok(/^Preview 1 is playing from the Preview track; the original clip is muted/.test(fx.status()), fx.status());
+  assert.deepStrictEqual(fx.live.snapshot()[0].clips.map((c) => c.name), fx.initial[0].clips.map((c) => c.name), 'the user\'s clips are all still there');
   assert.strictEqual(fx.runner.copies.length, 0, 'previews are not copied');
   assert.deepStrictEqual(fx.lastUi('busy'), [1], 'the job is still busy: the window is open');
 
   fx.runner.preview();
   fx.pump();
   tracks = fx.live.tracks();
-  assert.strictEqual(tracks.length, 3, 'still one Preview track');
-  assert.strictEqual(tracks[1], pt);
-  previewClipOk(fx, pt, 2);
-  assert.notStrictEqual(fx.live.liveClips(pt)[0].id, firstClip, 'a new clip');
-  assert.ok(!fx.live.exists(fx.live.objs[firstClip]), 'the old preview clip is gone');
-  assert.ok(/^Preview 2 is on the Preview track/.test(fx.status()), fx.status());
+  assert.strictEqual(tracks.length, 4, 'track B was made');
+  assert.deepStrictEqual(tracks.map((t) => t.name), ['1-Vocals', 'Preview A: Vocal take', 'Preview B: Vocal take', '2-Audio']);
+  const b = audible(fx, 2);
+  assert.strictEqual(b, tracks[2]);
+  assert.strictEqual(a.props.mute, 1);
+
+  fx.runner.preview();
+  fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 4, 'no third track: A is used again');
+  assert.strictEqual(audible(fx, 3), a, 'preview 3 plays from A again');
+  assert.strictEqual(srcMuted(fx), 1);
   assert.strictEqual(fx.live.clock.tasks.size, 0);
-  // never a clip created on, or removed from, the user's own tracks
-  assert.deepStrictEqual(fx.live.snapshot()[0], fx.initial[0]);
-  assert.deepStrictEqual(fx.live.snapshot()[2], fx.initial[1]);
+  assert.deepStrictEqual(fx.live.snapshot()[3], fx.initial[1], 'the user\'s other track is untouched');
 });
 
-test('live preview: also with a Live that shows new objects late (the sequence re-reads often and long enough)', () => {
-  for (const delayTicks of [1, 2]) {
-    const fx = previewFixture({ live: { delayTicks } });
-    fx.runner.preview();
-    fx.pump();
-    previewClipOk(fx, fx.live.tracks()[1], 1);
-    fx.runner.preview();
-    fx.pump();
-    previewClipOk(fx, fx.live.tracks()[1], 2);
-    fx.runner.finish();
-    fx.pump();
-    assert.ok(/^Done\./.test(fx.status()), fx.status());
-    assert.strictEqual(fx.live.tracks().length, 2, 'the Preview track is gone');
-  }
+test('live preview: a swap never leaves two audible Preview tracks for long, and the old clip is removed after the swap', () => {
+  const fx = previewFixture();
+  fx.runner.preview(); fx.pump();
+  fx.runner.preview(); fx.pump();
+  const calls = fx.live.calls.filter((c) => c.fn === 'set mute' || c.fn === 'delete_clip').map((c) => c.fn + (c.args ? ' ' + c.args[0] : ''));
+  const lastSets = fx.live.calls.filter((c) => c.fn === 'set mute').slice(-2).map((c) => c.args[0]);
+  assert.deepStrictEqual(lastSets, [0, 1], 'the new track is unmuted, then the old one muted: ' + calls.join(' | '));
 });
 
-test('live preview: Apply removes the Preview track first, then places the result (take lane, new track and replace)', () => {
+test('live preview: Apply restores the original clip, removes both Preview tracks, then places the result (all three placements)', () => {
   for (const placement of ['takeLane', 'newTrack', 'replace']) {
     const fx = previewFixture({ placement });
-    fx.runner.preview();
-    fx.pump();
-    assert.strictEqual(fx.live.tracks().length, 3);
+    fx.runner.preview(); fx.pump();
+    fx.runner.preview(); fx.pump();
+    assert.strictEqual(fx.live.tracks().length, 4);
+    assert.strictEqual(srcMuted(fx), 1);
     fx.runner.finish();
     fx.pump();
     invariants(fx);
     assert.ok(/^Done\./.test(fx.status()), placement + ': ' + fx.status());
-    assert.ok(!/Preview/.test(fx.live.tracks().map((t) => t.name).join('|')), placement + ': the Preview track is gone');
+    assert.ok(!/Preview/.test(fx.live.tracks().map((t) => t.name).join('|')), placement + ': the Preview tracks are gone');
     const names = fx.live.allClips().map((e) => fx.live.clipSnap(e.clip).name);
     assert.ok(names.every((n) => !/preview/.test(n)), placement + ': no preview clip is left: ' + names.join(', '));
-    const want = { takeLane: 2, newTrack: 3, replace: 3 }[placement];   // replace: the muted backup track stays
+    const want = { takeLane: 2, newTrack: 3, replace: 3 }[placement];
     assert.strictEqual(fx.live.tracks().length, want, placement + ': track count');
     if (placement === 'replace') originalSurvives(fx);
+    else assert.strictEqual(srcMuted(fx), 0, placement + ': the original clip is audible again');
+    // in replace mode the original was unmuted BEFORE it was copied to the backup track: the backup clip is not muted
+    if (placement === 'replace') fx.live.allClips().forEach((e) => assert.strictEqual(e.clip.props.muted, 0, 'no clip is left muted'));
     assert.deepStrictEqual(fx.lastUi('busy'), [0]);
     assert.strictEqual(fx.live.clock.tasks.size, 0);
   }
 });
 
-test('live preview: Cancel (or a failed job) removes the Preview track and says what the job said', () => {
+test('live preview: Cancel (or a failed job) removes the Preview tracks, unmutes the original and says what the job said', () => {
   let fx = previewFixture();
-  fx.runner.preview();
-  fx.pump();
-  assert.strictEqual(fx.live.tracks().length, 3);
+  fx.runner.preview(); fx.pump();
+  fx.runner.preview(); fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 4);
   fx.runner.finish({ status: 'cancelled', message: 'closed without applying', resultJson: { version: 1, id: fx.runner.job.id, status: 'cancelled', message: 'closed without applying' } });
   fx.pump();
   assert.deepStrictEqual(fx.live.snapshot(), fx.initial, 'back to the initial set');
-  assert.ok(/^Cancelled\./.test(fx.status()) || /ancel/.test(fx.status()), fx.status());
+  assert.strictEqual(srcMuted(fx), 0, 'the original clip is audible again');
+  assert.ok(/ancel/.test(fx.status()), fx.status());
   assert.deepStrictEqual(fx.lastUi('busy'), [0]);
   assert.strictEqual(fx.live.clock.tasks.size, 0);
 
   fx = previewFixture();
-  fx.runner.preview();
-  fx.pump();
+  fx.runner.preview(); fx.pump();
   fx.runner.finish({ status: 'error', message: 'the plug-in crashed', resultJson: { version: 1, id: fx.runner.job.id, status: 'error', message: 'the plug-in crashed' } });
   fx.pump();
   assert.deepStrictEqual(fx.live.snapshot(), fx.initial);
+  assert.strictEqual(srcMuted(fx), 0);
   assert.ok(/the plug-in crashed/.test(fx.status()), fx.status());
-  assert.deepStrictEqual(fx.lastUi('busy'), [0]);
+});
+
+test('live preview: a source clip the user had muted stays muted (the device only unmutes what it muted)', () => {
+  const fx = previewFixture({ setup: (live, o) => { o.clip.props.muted = 1; } });
+  fx.runner.preview(); fx.pump();
+  assert.strictEqual(srcMuted(fx), 1);
+  fx.runner.finish({ status: 'cancelled', resultJson: { version: 1, id: fx.runner.job.id, status: 'cancelled', message: 'x' } });
+  fx.pump();
+  assert.strictEqual(srcMuted(fx), 1, 'still muted: it was the user\'s mute');
 });
 
 test('live preview: the host ends while a preview is being placed -> the preview finishes, then the result is placed', () => {
@@ -1911,7 +1932,8 @@ test('live preview: the host ends while a preview is being placed -> the preview
   invariants(fx);
   assert.ok(/^Done\./.test(fx.status()), fx.status());
   assert.ok(!/Preview/.test(fx.live.tracks().map((t) => t.name).join('|')));
-  assert.strictEqual(fx.live.tracks().length, 3, 'preview track removed, result track added');
+  assert.strictEqual(fx.live.tracks().length, 3, 'preview tracks removed, result track added');
+  assert.strictEqual(srcMuted(fx), 0);
   resultClipOk(fx, fx.live.liveClips(fx.live.tracks()[1])[0], 16, 'Vocal take (Melodyne)');
 });
 
@@ -1919,8 +1941,7 @@ test('live preview: previews that arrive while one is placed collapse to the new
   const fx = previewFixture();
   fx.runner.preview(); fx.runner.preview(); fx.runner.preview(); fx.runner.preview();
   fx.pump();
-  const pt = fx.live.tracks()[1];
-  previewClipOk(fx, pt, 4);
+  audible(fx, 4);
   const created = fx.live.calls.filter((c) => c.fn === 'create_audio_clip').length;
   assert.ok(created <= 2, 'at most the first and the newest were placed, not all four: ' + created);
 });
@@ -1931,6 +1952,7 @@ test('live preview: off by default, and a preview message without the toggle is 
   fx.runner.preview();
   fx.pump();
   assert.deepStrictEqual(fx.live.snapshot(), fx.initial, 'nothing placed');
+  assert.strictEqual(srcMuted(fx), 0);
   fx.runner.finish();
   fx.pump();
   assert.ok(/^Done\./.test(fx.status()), fx.status());
@@ -1940,81 +1962,103 @@ test('live preview: unusable previews are ignored (error result, missing file, s
   const fx = previewFixture();
   fx.runner.preview({ resultJson: { version: 1, id: 'x', status: 'error', message: 'no' } });
   fx.runner.preview({ noWav: true });
-  fx.runner.preview({ frames: 10, resultJson: undefined });          // a 10-frame file is not what the result says
   fx.pump();
   const bad = fx.runner.preview({ n: 9 });
-  fs.writeFileSync(bad.resultPath, Buffer.alloc(50));                 // truncated after the fact
+  fs.writeFileSync(bad.resultPath, Buffer.alloc(50));
   fx.pump();
   assert.strictEqual(fx.live.tracks().length, 2, 'no track was made for any of them');
+  assert.strictEqual(srcMuted(fx), 0);
   fx.sb.hostStatus(enc({ state: 'preview', n: 11, jobId: 'another-job', resultJson: bad, previewDir: '/x' }));
   fx.pump();
   assert.strictEqual(fx.live.tracks().length, 2);
-  // a good one still works afterwards
   fx.runner.preview({ n: 12 });
   fx.pump();
-  assert.strictEqual(fx.live.tracks().length, 3);
-  assert.ok(fx.live.liveClips(fx.live.tracks()[1])[0].props.file_path.endsWith('/preview-12/result.wav'));
+  audible(fx, 12);
 });
 
-test('live preview: a failing preview rolls back its own objects and the next one works', () => {
+test('live preview: a failing first preview rolls back and leaves the original audible; the next one works', () => {
   const fx = previewFixture({ live: { faults: [{ fn: 'create_audio_clip', nth: 1, mode: 'throw' }] } });
   fx.runner.preview();
   fx.pump();
   assert.deepStrictEqual(fx.live.snapshot(), fx.initial, 'the new Preview track was removed again');
+  assert.strictEqual(srcMuted(fx), 0, 'the original is still audible');
   assert.ok(/^No preview: Placing the result clip failed/.test(fx.status()), fx.status());
   assert.deepStrictEqual(fx.lastUi('busy'), [1], 'the job goes on: the window is open');
   fx.runner.preview();
   fx.pump();
-  assert.strictEqual(fx.live.tracks().length, 3);
-  previewClipOk(fx, fx.live.tracks()[1], 2);
-  // a failing replacement removes the old preview as well, and the next starts from scratch
-  const fx2 = previewFixture({ live: { faults: [{ fn: 'create_audio_clip', nth: 2, mode: 'throw' }] } });
-  fx2.runner.preview();
-  fx2.pump();
-  assert.strictEqual(fx2.live.tracks().length, 3);
-  fx2.runner.preview();
-  fx2.pump();
-  assert.deepStrictEqual(fx2.live.snapshot(), fx2.initial, 'both preview objects are gone');
-  fx2.runner.preview();
-  fx2.pump();
-  previewClipOk(fx2, fx2.live.tracks()[1], 3);
-  fx2.runner.finish();
-  fx2.pump();
-  assert.ok(/^Done\./.test(fx2.status()), fx2.status());
-  assert.strictEqual(fx2.live.tracks().length, 2);
+  audible(fx, 2);
 });
 
-test('live preview: the Preview track deleted by the user, the source track deleted, the tempo changed', () => {
+test('live preview: a failing later preview never removes the audible one', () => {
+  // the 2nd create_audio_clip (preview 2, on the new track B) fails: A keeps playing preview 1
+  const fx = previewFixture({ live: { faults: [{ fn: 'create_audio_clip', nth: 2, mode: 'throw' }] } });
+  fx.runner.preview(); fx.pump();
+  fx.runner.preview(); fx.pump();
+  assert.ok(/^No preview: Placing the result clip failed/.test(fx.status()), fx.status());
+  assert.strictEqual(fx.live.tracks().length, 3, 'track B was removed again, A is untouched');
+  audible(fx, 1);
+  assert.strictEqual(srcMuted(fx), 1, 'the original stays muted while preview 1 plays');
+  fx.runner.preview(); fx.pump();
+  audible(fx, 3);
+  fx.runner.finish(); fx.pump();
+  assert.ok(/^Done\./.test(fx.status()), fx.status());
+  assert.strictEqual(fx.live.tracks().length, 2);
+  assert.strictEqual(srcMuted(fx), 0);
+});
+
+test('live preview: a Preview track deleted by the user is made again; the song tempo changed -> no preview', () => {
   const fx = previewFixture();
-  fx.runner.preview();
-  fx.pump();
-  const pt = fx.live.tracks()[1];
-  fx.live.deleteTrackById ? fx.live.deleteTrackById(pt.id) : fx.live.song.tracks.splice(1, 1);
-  fx.runner.preview();
-  fx.pump();
-  assert.strictEqual(fx.live.tracks().length, 3, 'a new Preview track was made');
-  previewClipOk(fx, fx.live.tracks()[1], 2);
+  fx.runner.preview(); fx.pump();
+  const a = previewTracksOf(fx)[0];
+  fx.live.song.tracks.splice(fx.live.song.tracks.indexOf(a.id), 1);
+  fx.runner.preview(); fx.pump();
+  assert.strictEqual(previewTracksOf(fx).length, 1, 'a new Preview A was made');
+  audible(fx, 2);
   fx.live.song.tempo = 121;
-  fx.runner.preview();
-  fx.pump();
+  fx.runner.preview(); fx.pump();
   assert.ok(/^No preview: the song tempo changed\.$/.test(fx.status()), fx.status());
   fx.live.song.tempo = 120;
-  fx.runner.finish();
-  fx.pump();
+  fx.runner.finish(); fx.pump();
   assert.ok(/^Done\./.test(fx.status()), fx.status());
   assert.ok(!/Preview/.test(fx.live.tracks().map((t) => t.name).join('|')));
 });
 
-test('live preview: removing the Preview track fails at the end -> the result stays, a note says what to delete', () => {
+test('live preview: removing the Preview tracks fails at the end -> the result stays, a note says what to delete', () => {
   const fx = previewFixture({ live: { faults: [{ fn: 'delete_track', nth: 1, mode: 'noop' }] } });
-  fx.runner.preview();
-  fx.pump();
-  fx.runner.finish();
-  fx.pump();
+  fx.runner.preview(); fx.pump();
+  fx.runner.finish(); fx.pump();
   assert.ok(/^Done\./.test(fx.status()), fx.status());
   assert.ok(/Note: .*Preview track could not be removed; delete it by hand/.test(fx.status()), fx.status());
-  const lanes = fx.t0.lanes.length;
-  assert.strictEqual(lanes, 1, 'the result went to a take lane');
+  assert.strictEqual(fx.t0.lanes.length, 1, 'the result went to a take lane');
+  assert.strictEqual(srcMuted(fx), 0);
+});
+
+test('live preview: also with a Live that shows new objects late (the sequence re-reads often and long enough)', () => {
+  for (const delayTicks of [1, 2]) {
+    const fx = previewFixture({ live: { delayTicks } });
+    fx.runner.preview(); fx.pump();
+    audible(fx, 1);
+    fx.runner.preview(); fx.pump();
+    audible(fx, 2);
+    fx.runner.preview(); fx.pump();
+    audible(fx, 3);
+    fx.runner.finish(); fx.pump();
+    assert.ok(/^Done\./.test(fx.status()), fx.status());
+    assert.strictEqual(fx.live.tracks().length, 2, 'the Preview tracks are gone');
+    assert.strictEqual(srcMuted(fx), 0);
+  }
+});
+
+test('live preview: a placement is fast: the sequence needs no waiting when Live answers at once', () => {
+  const fx = previewFixture();
+  fx.runner.preview();
+  const t0 = fx.live.clock.now;
+  fx.pump();
+  assert.ok(fx.live.clock.now - t0 <= 200, 'the first preview was placed within 200 ms of fake time: ' + (fx.live.clock.now - t0));
+  const t1 = fx.live.clock.now;
+  fx.runner.preview();
+  fx.pump();
+  assert.ok(fx.live.clock.now - t1 <= 200, 'the second too: ' + (fx.live.clock.now - t1));
 });
 
 // ---- Transport sync

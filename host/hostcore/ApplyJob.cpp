@@ -47,7 +47,7 @@ namespace bridge
         }
     }
 
-    bool writeWavAtomically (const std::string& path, const Audio& audio, std::string& error)
+    bool writeWavAtomically (const std::string& path, const Audio& audio, std::string& error, bool durable)
     {
         const std::string tmp { path + ".tmp" };
         if (! writeWavFloat32 (tmp, audio, error))
@@ -56,8 +56,8 @@ namespace bridge
             return false;
         }
         // flush to disk before the rename makes it visible (result.json follows and claims it is complete)
-        const int fd { ::open (tmp.c_str (), O_RDONLY | O_CLOEXEC) };
-        const bool synced { fd >= 0 && ::fsync (fd) == 0 };
+        const int fd { durable ? ::open (tmp.c_str (), O_RDONLY | O_CLOEXEC) : -1 };
+        const bool synced { ! durable || (fd >= 0 && ::fsync (fd) == 0) };
         if (fd >= 0)
             ::close (fd);
         if (! synced)
@@ -192,7 +192,7 @@ namespace bridge
         info.diagnostics = diagnostics;
 
         const std::string resultPath { job.dir + "/result.wav" };
-        if (! writeWavAtomically (resultPath, finalAudio, error))
+        if (! writeWavAtomically (resultPath, finalAudio, error, job.durable))
             return failed (job, error, writeResultOnError);
 
         info.status = "ok";
@@ -208,6 +208,7 @@ namespace bridge
         Job preview { job };
         preview.dir = job.dir + "/preview-" + std::to_string (index);
         preview.keepRaw = false;
+        preview.durable = false;
         std::error_code ec;
         std::filesystem::create_directory (preview.dir, ec);
         if (ec || ! std::filesystem::is_directory (preview.dir))

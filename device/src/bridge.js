@@ -555,6 +555,7 @@ var ARABridge = (function (maxThis) {
     }
 
     function finishJob(line) {
+        restoreSource(S.job);
         if ((S.pv || (S.run && S.run.preview)) && S.job && !S.dead) { startPreviewCleanup(line); return; }
         dlog('finish ' + (S.job ? S.job.id + ' (' + S.job.phase + ')' : '-') + ': ' + (line || ''));
         S.lastFinishAt = now();
@@ -833,6 +834,7 @@ var ARABridge = (function (maxThis) {
         if (!j || d.jobId !== j.id) { log('done for another job ' + d.jobId + ' (ignored)'); return; }
         if (j.phase === 'placing' || j.phase === 'copying') { log('second done ignored'); return; }
         if (S.run && S.run.preview) { j.doneWaiting = d; log('done while a preview is being placed: waiting for it'); return; }
+        restoreSource(j);       // the original is audible again before anything is placed
         stop(launchWatch);
         stop(cancelWatch);
         setCancelable(false);
@@ -981,8 +983,8 @@ var ARABridge = (function (maxThis) {
             existingClips: existing, placeAtBeats: placeAtBeats });
         if (!plan.ok) { keptLine(j); finishJob('Not placed: ' + plan.reason + '.'); return; }
         var pv = S.pv;
-        if (pv) {   // the preview track goes first; a failure to remove it is only a note
-            plan.ops = previewRemovalOps().concat(plan.ops);
+        if (pv) {   // the Preview tracks go first; a failure to remove them is only a note
+            plan.ops = removalOps(pv).concat(plan.ops);
         }
         S.run = {
             job: j, mode: j.placement, tempo: tempo, trackId: j.trackId, sourceClipId: j.clipId,
@@ -990,7 +992,7 @@ var ARABridge = (function (maxThis) {
             list: plan.ops, i: 0, phase: 'main', produced: {}, order: [], pending: null, ticks: 0,
             destructive: 'not-run', failure: null, warnings: [], leftovers: [], laneLeft: false
         };
-        if (pv) { seedPreview(S.run, pv); S.pv = null; }
+        if (pv) { seedSlots(S.run, pv); S.pv = null; }
         later(seqTask, 0);
     }
 
@@ -1087,18 +1089,60 @@ var ARABridge = (function (maxThis) {
     // track and clip are removed when the job ends (Apply: before the result is placed; Cancel and failures: by the
     // cleanup sequence in finishJob), and a failed preview rolls back like a placement. The sequences use the same
     // executor as the placement (run.preview / run.cleanup mark them).
-    function previewRemovalOps() {
-        return [
-            { op: 'delete_clip', target: 'previewTrack', label: 'Removing the preview', args: [{ ref: 'previewClip' }],
-                optional: true, optionalNote: 'the preview clip could not be removed; delete the Preview track by hand' },
-            { op: 'delete_track', target: 'song', label: 'Removing the preview track', args: [{ ref: 'previewTrack' }],
-                optional: true, optionalNote: 'the Preview track could not be removed; delete it by hand' }
-        ];
+    // Two Preview tracks A and B take turns (core.js, planPlacement mode 'preview'): S.pv = {slots: [A, B], active, n} with
+    // slot = {trackId, clipId} or null, active = the audible slot (-1 none). While a preview exists the source CLIP (not
+    // its track: other clips on it keep playing) is muted by this device and unmuted again before the result is placed
+    // or when the job ends, whatever way it ends (restoreSource).
+    function slotHasClip(s) {
+        if (!s || !s.clipId) return false;
+        var ids = clipList(apiById(s.trackId));
+        return ids !== null && has(ids, s.clipId);
     }
 
-    function seedPreview(run, pv) {
-        produce(run, 'previewTrack', 'track', pv.trackId, null, 0);
-        if (pv.clipId) produce(run, 'previewClip', 'clip', pv.clipId, 'previewTrack', pv.trackId);
+    function removalOps(pv) {
+        var ops = [], i;
+        for (i = 0; i < 2; i++) {
+            if (pv.slots[i] && pv.slots[i].clipId) {
+                ops.push({ op: 'delete_clip', target: 's' + i + 't', label: 'Removing the preview', args: [{ ref: 's' + i + 'c' }],
+                    optional: true, optionalNote: 'a preview clip could not be removed; delete the Preview tracks by hand' });
+            }
+        }
+        for (i = 0; i < 2; i++) {
+            if (pv.slots[i]) {
+                ops.push({ op: 'delete_track', target: 'song', label: 'Removing the preview track', args: [{ ref: 's' + i + 't' }],
+                    optional: true, optionalNote: 'a Preview track could not be removed; delete it by hand' });
+            }
+        }
+        return ops;
+    }
+
+    function seedSlot(run, tname, cname, slot) {
+        if (!slot) return;
+        produce(run, tname, 'track', slot.trackId, null, 0).seeded = true;
+        if (slot.clipId) produce(run, cname, 'clip', slot.clipId, tname, slot.trackId).seeded = true;
+    }
+    function seedSlots(run, pv) {
+        seedSlot(run, 's0t', 's0c', pv.slots[0]);
+        seedSlot(run, 's1t', 's1c', pv.slots[1]);
+    }
+
+    function muteSource(j) {
+        if (!j || j.srcMuted) return;
+        var c = apiById(j.clipId);
+        var cur = getNum(c, 'muted');
+        if (cur === null) { log('the source clip\'s mute state cannot be read'); return; }
+        if (cur === 1) return;   // muted by the user already: left alone, and not unmuted later
+        setProp(c, 'muted', 1);
+        if (getNum(c, 'muted') === 1) { j.srcMuted = true; dlog('source clip muted'); }
+        else log('the source clip could not be muted');
+    }
+    function restoreSource(j) {
+        if (!j || !j.srcMuted) return;
+        j.srcMuted = false;
+        try {
+            var c = apiById(j.clipId);
+            if (getNum(c, 'muted') === 1) { setProp(c, 'muted', 0); dlog('source clip unmuted'); }
+        } catch (e) { log('unmuting the source clip failed: ' + errText(e)); }
     }
 
     function newRun(j, extra) {
@@ -1122,7 +1166,7 @@ var ARABridge = (function (maxThis) {
         }
         var st = fileStat(rj.resultPath);
         if (!st.exists || (st.size !== null && st.size < 44 + rj.frames * 4)) { log('preview ' + d.n + ': the file is missing or incomplete (ignored)'); return; }
-        j.pendingPreview = { n: d.n, res: rj };
+        j.pendingPreview = { n: d.n, res: rj, at: now() };
         if (!S.run) startPreview(j);   // else: when the running sequence ends (only the newest preview is kept)
     }
 
@@ -1141,14 +1185,30 @@ var ARABridge = (function (maxThis) {
         if (trackIndex < 0) { previewSkipped(j, 'the source track was deleted'); return; }
         var tempo = getNum(song, 'tempo');
         if (tempo === null || Math.abs(tempo - j.tempo) > 1e-6) { previewSkipped(j, 'the song tempo changed'); return; }
-        var pv = S.pv;
-        if (pv && indexOfVal(tracks, pv.trackId) < 0) { log('the preview track is gone'); S.pv = pv = null; }
+        var slots = S.pv ? [S.pv.slots[0], S.pv.slots[1]] : [null, null];
+        var active = S.pv ? S.pv.active : -1;
+        for (var si = 0; si < 2; si++) {
+            if (slots[si] && indexOfVal(tracks, slots[si].trackId) < 0) {
+                log('the preview track ' + (si === 0 ? 'A' : 'B') + ' is gone');
+                slots[si] = null;
+                if (active === si) active = -1;
+            }
+        }
+        var idleIdx = active === 0 ? 1 : 0;
+        var idle = slots[idleIdx];
+        var activeSlot = active >= 0 ? slots[active] : null;
+        var idleHasClip = slotHasClip(idle);
+        if (idle && idle.clipId && !idleHasClip) idle = slots[idleIdx] = { trackId: idle.trackId, clipId: null };
+        var activeHasClip = slotHasClip(activeSlot);
         var plan = C.planPlacement({ mode: 'preview', region: j.region, result: { frames: p.res.frames, sampleRate: p.res.sampleRate },
-            tempo: tempo, trackIndex: trackIndex, resultFile: p.res.resultPath, pluginLabel: 'preview', hasPreviewTrack: !!pv });
+            tempo: tempo, trackIndex: trackIndex, resultFile: p.res.resultPath, pluginLabel: 'preview',
+            idle: { hasTrack: !!idle, hasClip: idleHasClip }, slotIndex: idleIdx, hasActive: !!activeSlot, activeHasClip: activeHasClip });
         if (!plan.ok) { previewSkipped(j, plan.reason); return; }
-        dlog('preview ' + p.n + ' ' + (pv ? 'replaces the clip' : 'creates the track') + ' frames=' + p.res.frames);
-        S.run = newRun(j, { preview: true, previewN: p.n, ops: plan.ops });
-        if (pv) seedPreview(S.run, pv);
+        dlog('preview ' + p.n + ' -> slot ' + (idleIdx === 0 ? 'A' : 'B') + (idle ? ' (track exists)' : ' (new track)') + ' frames=' + p.res.frames);
+        S.run = newRun(j, { preview: true, previewN: p.n, previewAt: p.at, ops: plan.ops, idleIdx: idleIdx, activeIdx: activeSlot ? active : -1,
+            slotsBefore: slots });
+        seedSlot(S.run, 'idleTrack', 'idleClip', idle);
+        seedSlot(S.run, 'activeTrack', 'activeClip', activeSlot);
         say('Updating the preview...');
         later(seqTask, 0);
     }
@@ -1163,17 +1223,31 @@ var ARABridge = (function (maxThis) {
         S.run = null;
         var j = run.job;
         var warn = run.warnings.length ? ' Note: ' + run.warnings.join('; ') + '.' : '';
+        var slots = run.slotsBefore.slice();
+        var it = run.produced.idleTrack, nc = run.produced.newClip;
+        var at = run.produced.activeTrack, ac = run.produced.activeClip;
         if (run.phase === 'main') {
-            var tr = run.produced.previewTrack, cl = run.produced.newClip;
-            if (tr && !tr.deleted && cl && !cl.deleted) {
-                S.pv = { trackId: tr.id, clipId: cl.id, n: run.previewN };
-                say('Preview ' + run.previewN + ' is on the Preview track. Mute the original track to compare.' + warn);
+            if (it && !it.deleted && nc && !nc.deleted) {
+                slots[run.idleIdx] = { trackId: it.id, clipId: nc.id };
+                if (run.activeIdx >= 0) {
+                    slots[run.activeIdx] = (at && !at.deleted) ? { trackId: at.id, clipId: (ac && !ac.deleted) ? ac.id : null } : null;
+                }
+                S.pv = { slots: slots, active: run.idleIdx, n: run.previewN };
+                muteSource(j);
+                dlog('preview ' + run.previewN + ' placed in ' + (now() - run.previewAt) + ' ms after the host published it');
+                say('Preview ' + run.previewN + ' is playing from the Preview track; the original clip is muted until you apply or cancel.' + warn);
             } else {
-                S.pv = null;
+                S.pv = run.activeIdx >= 0 ? { slots: slots, active: run.activeIdx, n: 0 } : null;
+                if (!S.pv) restoreSource(j);
                 say('The preview could not be placed.' + warn);
             }
         } else {
-            S.pv = null;   // the rollback removed what this sequence and the previous preview had made
+            // The rollback removed what this sequence made; the audible preview was never touched. What it had deleted
+            // (the idle slot's old clip) is gone from the slot too.
+            if (it && !it.seeded && it.deleted) slots[run.idleIdx] = null;
+            else if (slots[run.idleIdx] && run.produced.idleClip && run.produced.idleClip.deleted) slots[run.idleIdx] = { trackId: slots[run.idleIdx].trackId, clipId: null };
+            S.pv = (slots[0] || slots[1]) ? { slots: slots, active: run.activeIdx, n: 0 } : null;
+            if (run.activeIdx < 0) { if (!S.pv) restoreSource(j); }
             var left = run.leftovers.length ? ' Check the track: ' + run.leftovers.join('; ') + '.' : '';
             say('No preview: ' + run.failure + '.' + left + warn);
         }
@@ -1184,7 +1258,6 @@ var ARABridge = (function (maxThis) {
     function startPreviewCleanup(line) {
         var j = S.job;
         var ops = [];
-        var cleanup = null;
         var pv = S.pv;
         var inflight = S.run;
         S.pv = null;
@@ -1192,32 +1265,31 @@ var ARABridge = (function (maxThis) {
         stop(launchWatch);
         stop(cancelWatch);
         stop(copyWatch);
-        cleanup = newRun(j, { mode: 'cleanup', cleanup: true, line: line, ops: ops });
-        if (pv) seedPreview(cleanup, pv);
+        var cleanup = newRun(j, { mode: 'cleanup', cleanup: true, line: line, ops: ops });
+        if (pv) seedSlots(cleanup, pv);
+        if (pv) ops = removalOps(pv);
         if (inflight && inflight.preview) {   // a preview sequence was cut short: what it made goes too
             for (var i = 0; i < inflight.order.length; i++) {
                 var nm = inflight.order[i];
                 var o = inflight.produced[nm];
-                if (!o || o.deleted || (pv && (nm === 'previewTrack' || nm === 'previewClip'))) continue;
-                if (o.kind === 'track') { produce(cleanup, 'x' + nm, 'track', o.id, null, 0); }
-                else if (o.kind === 'clip') { produce(cleanup, 'x' + nm, 'clip', o.id, o.containerName ? 'x' + o.containerName : null, o.containerId); }
+                if (!o || o.deleted || isProducedId(cleanup, o.id)) continue;
+                if (o.kind === 'track') produce(cleanup, 'x' + nm, 'track', o.id, null, 0);
+                else if (o.kind === 'clip') produce(cleanup, 'x' + nm, 'clip', o.id, o.containerName ? 'x' + o.containerName : null, o.containerId);
+            }
+            for (var k in cleanup.produced) {
+                if (!cleanup.produced.hasOwnProperty(k) || k.charAt(0) !== 'x') continue;
+                var q = cleanup.produced[k];
+                if (q.kind === 'clip') ops.push({ op: 'delete_clip', target: q.containerName, label: 'Removing the preview', args: [{ ref: k }],
+                    optional: true, optionalNote: 'a preview clip could not be removed; delete the Preview tracks by hand' });
+            }
+            for (var k2 in cleanup.produced) {
+                if (cleanup.produced.hasOwnProperty(k2) && k2.charAt(0) === 'x' && cleanup.produced[k2].kind === 'track') {
+                    ops.push({ op: 'delete_track', target: 'song', label: 'Removing the preview track', args: [{ ref: k2 }],
+                        optional: true, optionalNote: 'a Preview track could not be removed; delete it by hand' });
+                }
             }
         }
-        var names = [];
-        for (var k in cleanup.produced) if (cleanup.produced.hasOwnProperty(k)) names.push(k);
-        for (var a = 0; a < names.length; a++) {
-            if (cleanup.produced[names[a]].kind === 'clip') {
-                ops.push({ op: 'delete_clip', target: cleanup.produced[names[a]].containerName || 'previewTrack', label: 'Removing the preview',
-                    args: [{ ref: names[a] }], optional: true, optionalNote: 'a preview clip could not be removed; delete the Preview track by hand' });
-            }
-        }
-        for (var b = 0; b < names.length; b++) {
-            if (cleanup.produced[names[b]].kind === 'track') {
-                ops.push({ op: 'delete_track', target: 'song', label: 'Removing the preview track', args: [{ ref: names[b] }],
-                    optional: true, optionalNote: 'the Preview track could not be removed; delete it by hand' });
-            }
-        }
-        cleanup.list = ops;
+        cleanup.ops = cleanup.list = ops;
         dlog('preview cleanup (' + ops.length + ' ops) before: ' + line);
         S.run = cleanup;
         say('Removing the preview...');
@@ -1261,6 +1333,13 @@ var ARABridge = (function (maxThis) {
             if (out.pending) {
                 run.pending = { op: op, confirm: out.pending.confirm, exhausted: out.pending.exhausted,
                     maxTries: (out.pending.maxTries || CONFIRM_TRIES) * (gap === FAST_MS ? 6 : 1), tries: 0 };
+                if (gap === FAST_MS) {   // Live's calls are synchronous in practice: look once right away
+                    var pp = run.pending;
+                    pp.tries++;
+                    var r0;
+                    try { r0 = pp.confirm(); } catch (ce0) { r0 = null; }
+                    if (r0 !== null) { run.pending = null; opDone(run, op, r0); return; }
+                }
                 later(seqTask, gap);
                 return;
             }
@@ -1279,7 +1358,7 @@ var ARABridge = (function (maxThis) {
     function abortRun(run, why) {
         S.run = null;
         if (run.cleanup) { finishJob(run.line + ' (removing the preview stopped: ' + why + '; delete the Preview track by hand)'); return; }
-        if (run.preview) { S.pv = null; say('The preview stopped: ' + why + '. Check the Preview track.'); afterPreviewRun(run.job); return; }
+        if (run.preview) { S.pv = null; restoreSource(run.job); say('The preview stopped: ' + why + '. Check the Preview tracks.'); afterPreviewRun(run.job); return; }
         keptLine(run.job);
         var orf = run.onRestoreFailure;
         if (run.destructive !== 'not-run' && orf) finishJob(orf.message + ' (' + why + ')');
@@ -1342,6 +1421,7 @@ var ARABridge = (function (maxThis) {
             var name = run.order[i];
             var p = run.produced[name];
             if (!p || p.deleted) continue;
+            if (p.seeded && run.preview) continue;   // a failed preview never removes the audible one
             if (p.kind === 'clip') {
                 // also on a produced track: if that track cannot be removed (say, the user dropped a clip on it), at
                 // least our clip is gone
@@ -1411,6 +1491,7 @@ var ARABridge = (function (maxThis) {
     function produce(run, name, kind, id, containerName, containerId) {
         run.produced[name] = { kind: kind, id: id, containerName: containerName, containerId: containerId, deleted: false };
         run.order.push(name);
+        return run.produced[name];
     }
 
     function producedName(run, id) {
@@ -1548,9 +1629,10 @@ var ARABridge = (function (maxThis) {
             return v !== null && Math.abs(v - op.value) <= 1e-4;
         }
         return { pending: {
-            confirm: function () { return matches() ? (r.ok ? {} : { warn: op.property + ': Live reported ' + r.error }) : null; },
+            confirm: function () { return matches() ? (r.ok || op.silent ? {} : { warn: op.property + ': Live reported ' + r.error }) : null; },
             exhausted: function () {
                 var why = op.property + ' reads ' + String(getVal(t.api, op.property, true)) + (r.ok ? '' : ' (' + r.error + ')');
+                if (op.silent) { log('optional ' + op.property + ' is not available: ' + why); return {}; }
                 return critical ? { fail: why } : { warn: op.property + ' was not applied' };
             }
         } };
@@ -1781,7 +1863,8 @@ var ARABridge = (function (maxThis) {
         } else if (j) {
             log('the device was deleted during a job (' + j.phase + '); its result stays in the job folder');
         }
-        if (S.pv) log('the device was deleted while a Preview track exists: delete it by hand');
+        if (S.pv) log('the device was deleted while Preview tracks exist: delete them by hand');
+        if (j) restoreSource(j);
         S.job = null;
         S.run = null;
     }

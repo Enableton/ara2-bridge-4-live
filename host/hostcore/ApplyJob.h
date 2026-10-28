@@ -50,7 +50,8 @@ namespace bridge
 
     // Writes a 32-bit float WAV to a temp file next to 'path', flushes it to disk and renames it to 'path'.
     // false with 'error' (and no temp file left) on failure.
-    bool writeWavAtomically (const std::string& path, const Audio& audio, std::string& error);
+    // 'durable' false skips the flush to disk (the rename is still atomic).
+    bool writeWavAtomically (const std::string& path, const Audio& audio, std::string& error, bool durable = true);
 
     // Writes result.json with status "error" and 'message' unless result.json already exists.
     // Returns false (and says why) if nothing was written.

@@ -49,7 +49,7 @@ const DEFAULT_DELAYS = {
   sigkillMs: 3000,             // cancel ladder: second SIGTERM -> SIGKILL
   releaseAfterResultMs: 20000, // result reported but the host still alive: stop supervising after this
   findPluginsTimeoutMs: 30000,
-  previewPollMs: 60,           // result.json / preview poll of a job with live preview
+  previewPollMs: 25,           // result.json / preview poll of a job with live preview
   syncPollMs: 30,              // transport sync: how often the host's sync-events.txt is read
   backstopMs: null,            // headless backstop override (ms); null = contract formula
 };

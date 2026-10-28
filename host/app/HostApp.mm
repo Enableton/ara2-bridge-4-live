@@ -51,7 +51,7 @@ namespace
     constexpr double kPollSeconds { 0.1 };
     constexpr double kCloseAfterApplySeconds { 1.2 };
     constexpr double kPreviewBaselineSeconds { 2.0 };   // after the window opened: when the unedited render is taken
-    constexpr double kPreviewQuietSeconds { 0.2 };      // no edit notification for this long: render the preview
+    constexpr double kPreviewQuietSeconds { 0.12 };      // no edit notification for this long: render the preview
     constexpr int kPreviewKeep { 3 };                   // preview folders kept in the job folder
     constexpr double kOutputCheckSeconds { 0.5 };   // after Play: did the output device call for audio?
     constexpr CGFloat kOutputMenuWidth { 230.0 };
@@ -1230,6 +1230,7 @@ namespace
         error = "the plug-in's analysis did not finish";
     else
         ok = renderJobClip (*context.document, context.job, context.layout, std::ref (idle), quiet, rendered, error, diagnostics);
+    const double rendersDone { std::chrono::duration<double> (std::chrono::steady_clock::now () - started).count () };
 
     if (ok && ! idle.timedOut () && ! S.cancelRequested && ! bridge::stopRequested ())
     {
@@ -1258,6 +1259,7 @@ namespace
         else
         {
             const int index { ++S.previewIndex };
+            const auto publishStarted { std::chrono::steady_clock::now () };
             const auto publish = [&] (bridge::Audio& out, std::string&, std::string&) { out = std::move (rendered); return true; };
             const auto info { bridge::writePreview (context.job, index, context.original, context.layout.regions[context.layout.renderClip].sourceStart,
                                                     publish, [] (const std::string& line) { say (line); }) };
@@ -1265,7 +1267,9 @@ namespace
             {
                 S.previewLastHash = hash;
                 bridge::prunePreviews (context.job.dir, kPreviewKeep);
-                std::snprintf (text, sizeof text, "live preview: published preview-%d (render %.2f s)", index, renderSeconds);
+                const double publishSeconds { std::chrono::duration<double> (std::chrono::steady_clock::now () - publishStarted).count () };
+                std::snprintf (text, sizeof text, "live preview: published preview-%d (analysis+renders %.2f s, realign+write %.2f s, total %.2f s)", index,
+                               rendersDone, publishSeconds, rendersDone + publishSeconds);
                 say (text);
             }
             else

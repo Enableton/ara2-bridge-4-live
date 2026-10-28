@@ -681,10 +681,13 @@ var core = (function () {
         var verifyNew = { warping: 0, looping: 0, startBeats: placeAt, startTolBeats: 0.001, lengthSec: resultSec,
             lengthTolSec: TOL_SEC, tempo: tempo };
         function tail(extra) {
+            extra = extra || {};
             ops.push({ op: 'create_audio_clip', target: clipTarget, label: 'Placing the result clip',
                 args: [spec.resultFile, placeAt], produces: 'newClip' });
             ops.push({ op: 'set', target: 'newClip', label: 'Turning Warp off', property: 'warping', value: 0 });
-            ops.push({ op: 'set', target: 'newClip', label: 'Naming the clip', property: 'name', value: newName });
+            // preview clips: keep the whole file in RAM if Live has that property (no disk reads while playing); silent if not
+            if (extra.ramMode) ops.push({ op: 'set', target: 'newClip', label: 'Loading the clip into RAM', property: 'ram_mode', value: 1, silent: true });
+            if (!extra.skipName) ops.push({ op: 'set', target: 'newClip', label: 'Naming the clip', property: 'name', value: newName });
             if (isNum(region.gain)) {
                 ops.push({ op: 'set', target: 'newClip', label: 'Copying the clip gain', property: 'gain', value: region.gain });
             }
@@ -692,19 +695,34 @@ var core = (function () {
         }
 
         if (mode === 'preview') {
-            // First preview: a new track right below the source track. Later ones: the previous preview clip is removed
-            // (seeded by the device as produced 'previewTrack' / 'previewClip') and the new one goes onto the same track.
-            if (spec.hasPreviewTrack === true) {
-                ops.push({ op: 'delete_clip', target: 'previewTrack', label: 'Removing the previous preview',
-                    args: [{ ref: 'previewClip' }] });
+            // Two Preview tracks (A and B) take turns. The new clip goes onto the one that is silent (idle), then the tracks
+            // swap their mute state: the edit is heard from a clip that Live had time to load, with no gap, and the previous
+            // clip is removed. spec.idle = {hasTrack, hasClip} of the idle slot, spec.slotIndex its number (0 = A, 1 = B),
+            // spec.hasActive / spec.activeHasClip describe the audible one. The device seeds the executor with the existing
+            // objects as 'idleTrack', 'idleClip', 'activeTrack' and 'activeClip'.
+            var idle = isObj(spec.idle) ? spec.idle : {};
+            var slot = spec.slotIndex === 1 ? 1 : 0;
+            if (idle.hasTrack === true) {
+                if (idle.hasClip === true) {
+                    ops.push({ op: 'delete_clip', target: 'idleTrack', label: 'Removing the old preview clip', args: [{ ref: 'idleClip' }] });
+                }
             } else {
                 ops.push({ op: 'create_audio_track', target: 'song', label: 'Creating the preview track',
-                    args: [trackIndex + 1], produces: 'previewTrack' });
-                ops.push({ op: 'set', target: 'previewTrack', label: 'Naming the preview track', property: 'name',
-                    value: cut('Preview: ' + baseName, 60, false) });
+                    args: [trackIndex + 1 + slot], produces: 'idleTrack' });
+                ops.push({ op: 'set', target: 'idleTrack', label: 'Naming the preview track', property: 'name',
+                    value: cut('Preview ' + (slot === 0 ? 'A' : 'B') + ': ' + baseName, 60, false) });
+                ops.push({ op: 'set', target: 'idleTrack', label: 'Keeping the preview track silent', property: 'mute', value: 1 });
             }
-            clipTarget = 'previewTrack';
-            tail();
+            clipTarget = 'idleTrack';
+            tail({ skipName: idle.hasTrack === true, ramMode: true });
+            ops.push({ op: 'set', target: 'idleTrack', label: 'Playing the new preview', property: 'mute', value: 0 });
+            if (spec.hasActive === true) {
+                ops.push({ op: 'set', target: 'activeTrack', label: 'Silencing the previous preview', property: 'mute', value: 1 });
+                if (spec.activeHasClip === true) {
+                    ops.push({ op: 'delete_clip', target: 'activeTrack', label: 'Removing the previous preview clip', args: [{ ref: 'activeClip' }],
+                        optional: true, optionalNote: 'the previous preview clip could not be removed' });
+                }
+            }
         } else if (mode === 'takeLane') {
             ops.push({ op: 'create_take_lane', target: 'track', label: 'Creating take lane', args: [], produces: 'lane' });
             clipTarget = 'lane';

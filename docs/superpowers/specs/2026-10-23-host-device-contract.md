@@ -138,10 +138,15 @@ and `realign` handling as the job's result, `resultPath` pointing into that fold
   `preview-<n>/result.json` once (newest first; an older one that was skipped is dropped, one that does not parse yet is looked at
   again) as `status {state: "preview", n, previewDir, resultJson (slimmed like `done`), jobId, ...}`. No new selector: the patch routes
   `status` to js already. Nothing is reported after the job's result.
-- The device places each preview as an ordinary clip on a track it makes (`Preview: <clip name>`, right below the source
-  track, clip `<name> (preview)`), so Live itself plays it in sync with every other track. The next preview removes the
-  previous clip first. The track is removed when the job ends (before the result is placed for Apply; by a cleanup sequence for
-  Cancel and failures). The source track is never changed; the user mutes it to compare.
+- The device plays each preview from **two tracks it makes, Preview A and Preview B**, right below the source track, taking turns: the
+  new clip goes onto the silent track (the old clip there is removed first; `ram_mode` is set when Live has it), the tracks then swap
+  their mute state (new on, previous off) and the previous clip is removed. Live itself plays the clip, so it is in sync with every other
+  track. While a preview plays, the **source clip** (`Clip.muted`, not its track) is muted by the device; it is unmuted again before the
+  result is placed (Apply), on Cancel and on every other way the job ends, but only if the device muted it (a clip the user had muted stays
+  muted). A failing preview rolls back only what it made and never removes the audible track. The Preview tracks are removed when the job
+  ends (before the result is placed for Apply; by a cleanup sequence for Cancel and failures).
+- Timing (measured with a real Melodyne, 44 s clip): the whole pipeline renders in 0.3 s; the host log has the breakdown per preview and
+  `device.log` the time from the host's publish to the swap. Preview WAVs are not flushed to disk before the rename.
 
 ## Transport sync (window mode, Melodyne, `sync: true`)
 

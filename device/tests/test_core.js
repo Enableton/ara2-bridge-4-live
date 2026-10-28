@@ -639,25 +639,42 @@ test('planPlacement takeLane: ordered ops', () => {
   deq(JSON.parse(JSON.stringify(p.ops)), p.ops, 'plain JSON objects');
 });
 
-test('planPlacement preview: first preview makes a named track below the source, later ones replace the clip', () => {
-  const first = core.planPlacement(planSpec('preview', { trackIndex: 3, pluginLabel: 'preview', existingClips: undefined, sourceClipId: undefined }));
+test('planPlacement preview: A/B tracks - the new clip goes onto the silent track, then the tracks swap', () => {
+  const base = { trackIndex: 3, pluginLabel: 'preview', existingClips: undefined, sourceClipId: undefined };
+  // first preview: no track yet -> slot A is made, named, kept silent, filled, then unmuted
+  const first = core.planPlacement(planSpec('preview', Object.assign({}, base, { idle: { hasTrack: false, hasClip: false }, slotIndex: 0, hasActive: false })));
   ok(first.ok, 'ok: ' + first.reason);
-  deq(kinds(first.ops), ['create_audio_track@song', 'set:name@previewTrack', 'create_audio_clip@previewTrack', 'set:warping@newClip',
-    'set:name@newClip', 'set:gain@newClip', 'verify@newClip']);
-  deq(first.ops[0].args, [4]); eq(first.ops[0].produces, 'previewTrack');
-  eq(first.ops[1].value, 'Preview: render_1');
-  deq(first.ops[2].args, [planSpec().resultFile, 32]);
-  eq(first.ops[4].value, 'render_1 (preview)');
+  deq(kinds(first.ops), ['create_audio_track@song', 'set:name@idleTrack', 'set:mute@idleTrack', 'create_audio_clip@idleTrack', 'set:warping@newClip',
+    'set:ram_mode@newClip', 'set:name@newClip', 'set:gain@newClip', 'verify@newClip', 'set:mute@idleTrack']);
+  deq(first.ops[0].args, [4]); eq(first.ops[0].produces, 'idleTrack');
+  eq(first.ops[1].value, 'Preview A: render_1');
+  eq(first.ops[2].value, 1); eq(first.ops[9].value, 0);
+  deq(first.ops[3].args, [planSpec().resultFile, 32]);
+  eq(first.ops[6].value, 'render_1 (preview)');
+  ok(first.ops[5].silent === true, 'RAM mode is optional');
   eq(first.rollbackAfter.length, 0, 'nothing destructive');
 
-  const next = core.planPlacement(planSpec('preview', { trackIndex: 3, pluginLabel: 'preview', hasPreviewTrack: true }));
-  ok(next.ok, 'ok: ' + next.reason);
-  deq(kinds(next.ops), ['delete_clip@previewTrack', 'create_audio_clip@previewTrack', 'set:warping@newClip', 'set:name@newClip',
-    'set:gain@newClip', 'verify@newClip']);
-  deq(next.ops[0].args, [{ ref: 'previewClip' }]);
-  ok(!next.ops.some((o) => o.destructive), 'the delete is not the destructive step');
-  for (const o of next.ops) ok(o.target !== 'track', 'nothing is created or changed on the user\'s track: ' + o.op);
-  for (const o of first.ops) ok(o.target !== 'track', 'nothing is created or changed on the user\'s track: ' + o.op);
+  // second preview: slot B is made right below A; A is audible, so it is silenced after the swap and its clip removed
+  const second = core.planPlacement(planSpec('preview', Object.assign({}, base, { idle: { hasTrack: false, hasClip: false }, slotIndex: 1, hasActive: true, activeHasClip: true })));
+  ok(second.ok, 'ok: ' + second.reason);
+  deq(kinds(second.ops), ['create_audio_track@song', 'set:name@idleTrack', 'set:mute@idleTrack', 'create_audio_clip@idleTrack', 'set:warping@newClip',
+    'set:ram_mode@newClip', 'set:name@newClip', 'set:gain@newClip', 'verify@newClip', 'set:mute@idleTrack', 'set:mute@activeTrack', 'delete_clip@activeTrack']);
+  deq(second.ops[0].args, [5]);
+  eq(second.ops[1].value, 'Preview B: render_1');
+  eq(second.ops[10].value, 1);
+  deq(second.ops[11].args, [{ ref: 'activeClip' }]); ok(second.ops[11].optional === true);
+
+  // third: slot A again (track exists, still holds its old clip): the old clip goes first; no naming (done at creation)
+  const third = core.planPlacement(planSpec('preview', Object.assign({}, base, { idle: { hasTrack: true, hasClip: true }, slotIndex: 0, hasActive: true, activeHasClip: true })));
+  ok(third.ok, 'ok: ' + third.reason);
+  deq(kinds(third.ops), ['delete_clip@idleTrack', 'create_audio_clip@idleTrack', 'set:warping@newClip', 'set:ram_mode@newClip', 'set:gain@newClip',
+    'verify@newClip', 'set:mute@idleTrack', 'set:mute@activeTrack', 'delete_clip@activeTrack']);
+  deq(third.ops[0].args, [{ ref: 'idleClip' }]);
+  ok(!third.ops.some((o) => o.destructive), 'nothing destructive');
+  for (const plan of [first, second, third]) for (const o of plan.ops) ok(o.target !== 'track', 'nothing is created or changed on the user\'s track: ' + o.op);
+  // an idle track without a clip needs no delete
+  const lone = core.planPlacement(planSpec('preview', Object.assign({}, base, { idle: { hasTrack: true, hasClip: false }, slotIndex: 1, hasActive: false })));
+  ok(!lone.ops.some((o) => o.op === 'delete_clip'));
   // the user's placement list is unchanged: 'preview' is not a choice
   planBad(planSpec('previews'), /unknown placement/);
   eq(core.buildJob(melSpec({ placement: 'preview' })).ok, false, 'preview is no placement for a job');
