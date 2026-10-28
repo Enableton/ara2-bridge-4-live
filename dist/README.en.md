@@ -1,8 +1,8 @@
-# ARA2 Bridge 4 Live – v0.2
+# ARA2 Bridge 4 Live – v0.2.1
 
 This Max for Live device sends an audio clip from Ableton Live's **Arrangement View** to **Melodyne** or **VocAlign**, lets you edit it there in its own window (with playback), and puts the result back into your project when you press **Apply**. Live does not support ARA2 itself; a small helper program ("BridgeHost") hosts the plug-ins.
 
-This is an early version (v0.2). Please report errors and oddities as a GitHub issue (see "Reporting problems" at the bottom).
+This is an early version (v0.2.1). Please report errors and oddities as a GitHub issue (see "Reporting problems" at the bottom).
 
 ## What you need
 

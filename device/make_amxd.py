@@ -57,7 +57,7 @@ NODE_PATH = os.path.join(HERE, "src", "runner.js")
 HTML_PATH = os.path.join(HERE, "ui", "ara2bridge_ui.html")
 OUT = os.path.join(HERE, "ARABridge.amxd")
 
-VERSION = "0.2"   # also shown in ui/ara2bridge_ui.html (test_amxd_container.py compares them)
+VERSION = "0.2.1"   # also shown in ui/ara2bridge_ui.html (test_amxd_container.py compares them)
 DEVICE_W = 800
 DEVICE_H = 169
 

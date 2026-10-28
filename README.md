@@ -15,7 +15,7 @@ A Max for Live device sends the selected audio clip from Live's **Arrangement Vi
 press **Apply**, the host renders the result offline and the device puts it back into the Arrangement as a take lane, a
 new track, or in place of the original clip.
 
-> **Status: experimental, v0.2.** Verified by the author with Live 12.4.6, Melodyne 5 and VocAlign 6 Pro on Apple
+> **Status: experimental, v0.2.1.** Verified by the author with Live 12.4.6, Melodyne 5 and VocAlign 6 Pro on Apple
 > Silicon. Other versions and machines are untested. Read "Known limits" before you rely on it.
 
 ## What it does
