@@ -1,8 +1,8 @@
-# ARA2 Bridge 4 Live – v0.1
+# ARA2 Bridge 4 Live – v0.2
 
 Mit diesem Max-for-Live-Gerät schickst Du einen Audio-Clip aus der **Arrangement-Ansicht** von Ableton Live an **Melodyne** oder **VocAlign**, bearbeitest ihn dort in einem eigenen Fenster (mit Wiedergabe) und bekommst das Ergebnis mit **Apply** zurück in Dein Projekt. Live selbst unterstützt ARA2 nicht; ein kleines Hilfsprogramm („BridgeHost“) übernimmt das Hosten der Plug-ins.
 
-Das ist eine frühe Version (v0.1). Bitte Fehler und Auffälligkeiten als GitHub-Issue melden (siehe ganz unten, „Probleme melden“).
+Das ist eine frühe Version (v0.2). Bitte Fehler und Auffälligkeiten als GitHub-Issue melden (siehe ganz unten, „Probleme melden“).
 
 ## Was Du brauchst
 
@@ -64,7 +64,12 @@ Alles lässt sich mit Rückgängig (Cmd+Z) zurücknehmen.
 2. Das Melodyne-Fenster öffnet sich vorne. Mit der **Leertaste** spielst Du ab. Hörst Du nichts, wähle im Fenster im Menü **Output** Deine Audio-Schnittstelle.
 3. Bearbeiten wie gewohnt, dann im Fenster **Apply to Live** drücken. Das Fenster schließt sich, das Ergebnis erscheint im Arrangement. Mit **Cancel** brichst Du ab.
 
-Der Schalter **Skip timing correction** ist normalerweise aus. Melodyne verschiebt den Rest des Clips nach einer Bearbeitung um Bruchteile von Millisekunden; das Gerät gleicht das aus. Wenn das Ergebnis trotzdem knistert oder anders klingt als im Melodyne-Fenster, schalte den Schalter ein und wiederhole den Vorgang, und melde es.
+**Preview** und **Sync transport** sind bei einem neuen Gerät eingeschaltet:
+
+- **Sync transport:** Play, Stop und die Abspielposition in Live bewegen den Cursor im Melodyne-Fenster, und Play, Leertaste, Stop oder ein Klick ins Lineal in Melodyne starten, stoppen oder verschieben Live. Melodynes eigene Wiedergabe ist stumm, Du hörst Live. Nur bei gleichbleibendem Tempo.
+- **Preview:** Nach jeder Änderung spielen zwei Hilfsspuren („Preview A“ und „Preview B“) die neue Fassung im Takt Deines Projekts. Der Original-Clip ist währenddessen stumm und wird bei Apply oder Cancel wieder eingeschaltet; die Hilfsspuren verschwinden dann. Beim Bearbeiten sammeln sich Rückgängig-Schritte.
+
+Der Schalter **Skip timing fix** (Zeitkorrektur) ist normalerweise aus. Melodyne verschiebt den Rest des Clips nach einer Bearbeitung um Bruchteile von Millisekunden; das Gerät gleicht das aus. Wenn das Ergebnis trotzdem knistert oder anders klingt als im Melodyne-Fenster, schalte den Schalter ein und wiederhole den Vorgang, und melde es.
 
 ### VocAlign
 

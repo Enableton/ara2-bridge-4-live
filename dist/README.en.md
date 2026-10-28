@@ -1,8 +1,8 @@
-# ARA2 Bridge 4 Live – v0.1
+# ARA2 Bridge 4 Live – v0.2
 
 This Max for Live device sends an audio clip from Ableton Live's **Arrangement View** to **Melodyne** or **VocAlign**, lets you edit it there in its own window (with playback), and puts the result back into your project when you press **Apply**. Live does not support ARA2 itself; a small helper program ("BridgeHost") hosts the plug-ins.
 
-This is an early version (v0.1). Please report errors and oddities as a GitHub issue (see "Reporting problems" at the bottom).
+This is an early version (v0.2). Please report errors and oddities as a GitHub issue (see "Reporting problems" at the bottom).
 
 ## What you need
 
@@ -62,7 +62,12 @@ Everything can be undone with Undo (Cmd+Z).
 2. The Melodyne window opens in front. Press the **space bar** to play. If you hear nothing, choose your audio interface in the window's **Output** menu.
 3. Edit as usual, then press **Apply to Live** in the window. The window closes and the result appears in the Arrangement. **Cancel** aborts.
 
-The **Skip timing correction** switch is normally off. After an edit Melodyne shifts the rest of the clip by fractions of a millisecond; the device compensates for that. If the result still crackles or sounds different from the Melodyne window, switch it on, repeat the process, and report it.
+**Preview** and **Sync transport** are on in a new device:
+
+- **Sync transport:** Play, Stop and the playhead in Live move the cursor in Melodyne's window, and Play, Space, Stop or a click in Melodyne's time ruler start, stop or move Live. Melodyne's own playback is silent, you hear Live. Constant tempo only.
+- **Preview:** after each edit, two helper tracks ("Preview A" and "Preview B") play the new version in sync with the rest of your project. The original clip is muted meanwhile and unmuted when you apply or cancel; the helper tracks disappear then. Undo steps pile up while you edit.
+
+The **Skip timing fix** switch (timing correction) is normally off. After an edit Melodyne shifts the rest of the clip by fractions of a millisecond; the device compensates for that. If the result still crackles or sounds different from the Melodyne window, switch it on, repeat the process, and report it.
 
 ### VocAlign
 

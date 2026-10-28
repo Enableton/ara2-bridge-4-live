@@ -46,7 +46,7 @@ JS_PATH = os.path.join(HERE, "build", "bridge.js")
 NODE_PATH = os.path.join(HERE, "src", "runner.js")
 OUT = os.path.join(HERE, "ARABridge.amxd")
 
-VERSION = "0.1"
+VERSION = "0.2"
 DEVICE_W = 330
 DEVICE_H = 169
 LABEL_BG = [0.13, 0.13, 0.13, 1.0]
