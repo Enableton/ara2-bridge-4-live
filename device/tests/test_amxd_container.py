@@ -354,11 +354,11 @@ class AmxdTest(unittest.TestCase):
         self.assertEqual(valueof("obj-t-norealign")["parameter_longname"], "Skip realign")
         self.assertEqual(valueof("obj-t-norealign")["parameter_shortname"], "NoRealign")
         self.assertEqual(self.boxes["obj-lnorealign"]["text"], "Skip timing fix")
-        self.assertEqual(valueof("obj-t-preview")["parameter_initial"], [0])        # Live preview is off by default
+        self.assertEqual(valueof("obj-t-preview")["parameter_initial"], [1])        # Live preview is on for a new device
         self.assertEqual(valueof("obj-t-preview")["parameter_longname"], "Live preview")
         self.assertEqual(valueof("obj-t-preview")["parameter_shortname"], "Preview")
         self.assertEqual(self.boxes["obj-lpreview"]["text"], "Preview")
-        self.assertEqual(valueof("obj-t-sync")["parameter_initial"], [0])           # transport sync is off by default
+        self.assertEqual(valueof("obj-t-sync")["parameter_initial"], [1])           # transport sync is on for a new device
         self.assertEqual(valueof("obj-t-sync")["parameter_longname"], "Sync transport")
         self.assertEqual(valueof("obj-t-sync")["parameter_shortname"], "Sync")
         self.assertEqual(self.boxes["obj-lsync"]["text"], "Sync transport")

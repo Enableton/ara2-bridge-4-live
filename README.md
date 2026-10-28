@@ -100,9 +100,9 @@ says `Ready.` plus the plug-ins it found. Full instructions, the status messages
   audio interface in the window's Output menu if you hear nothing).
 - **VocAlign:** put the device on the guide track *and* on the dub track (Live shows only the selected track's devices).
   Select the guide clip and press **Set guide (VocAlign)**; select the dub clip and press **Send to VocAlign**; align; **Apply**.
-- **Preview** (Melodyne; "Live preview"): switch it on before **Send to Melodyne**. After each edit the Preview tracks (A and B, in turns) play the new
+- **Preview** (Melodyne; "Live preview"): on for a new device. After each edit the Preview tracks (A and B, in turns) play the new
   version from below the source track; the original clip is muted automatically and unmuted when you apply or cancel.
-- **Sync transport** (Melodyne): switch it on before **Send to Melodyne**. Then Play, Stop and the playhead in Live move Melodyne's
+- **Sync transport** (Melodyne): on for a new device (a set you saved earlier keeps its own switch). Then Play, Stop and the playhead in Live move Melodyne's
   cursor, and Play, Space or a click in Melodyne's time ruler start, stop or move Live. Melodyne's own playback is silent: you hear
   Live. Combine it with **Preview** to hear the edit in Live. Constant tempo only.
 - **Skip timing fix** (Melodyne; "Skip timing correction"): leave it off normally. Switch it on if you ever hear clicks that are not in the
