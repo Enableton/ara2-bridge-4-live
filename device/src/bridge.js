@@ -33,6 +33,10 @@
 //                                      reached placement is given up (the device becomes idle), liveness is re-checked
 //   ready                              from live.thisdevice (through deferlow): LiveAPI is usable now
 //   refreshPlugins                     ask the runner for BridgeHost --find-plugins again
+//   uiRefresh                          from the HTML page (jweb) once it has loaded and bound its handlers: re-emits the
+//                                      last status line (outlet 0) and the whole UI state (outlet 2: setting ... busy
+//                                      cancel host plugins guide). Needed because Live restores the settings and js says
+//                                      its first status lines before the page exists.
 //   loadbang                           (Max calls it) resets the UI outlets
 //   notifydeleted                      (Max calls it when the object is deleted) stops every Task; later messages are
 //                                      ignored. Deleted while placing a replace result: the original is on the muted
@@ -42,9 +46,10 @@
 //   0  status text: ONE symbol for a comment/textedit (the patch puts [prepend set] in front)
 //   1  to node.script: launch <urlencoded {job, mode}> | cancel | findplugins | status
 //                      | copyresult <urlencoded {jobId, from, to}>
-//   2  UI state: busy <0|1> | cancel <0|1> (Cancel button enabled) | plugins <melodyne 0|1> <vocalign 0|1>
-//      | host <0|1> | guide <0|1>. Currently NOT connected in the patch (greying live.* objects made a button fire
-//      by itself); still emitted, and busy changes are logged in device.log ('ui busy 0|1').
+//   2  UI state: busy <0|1> | cancel <0|1> (a job can be cancelled) | plugins <melodyne 0|1> <vocalign 0|1>
+//      | host <0|1> | guide <0|1> | setting <placement 0-2|skip|preview|sync> <value> (only on uiRefresh).
+//      Goes to the HTML page ONLY, never to a live.* object (greying live.* objects made a button fire by itself);
+//      busy changes are logged in device.log ('ui busy 0|1').
 //
 // SEND DEBOUNCE. sendMelodyne/sendVocAlign within 1500 ms of the end of a job or of the previous accepted Send are
 // ignored ("Ignored a repeated Send click." followed by the previous status line).
@@ -145,6 +150,7 @@ var ARABridge = (function (maxThis) {
         lastSendAt: null,         // now() of the last accepted Send (launch)
         lastFinishAt: null,       // now() of the last finishJob
         lastLine: '',             // the last status line other than the debounce note
+        cancelable: false,        // last value sent as `ui cancel`
         retryFor: null,           // job id a busy retry is scheduled for
         announce: false           // the next plugins/no-host reply goes to the status line (startup, Refresh)
     };
@@ -491,7 +497,7 @@ var ARABridge = (function (maxThis) {
     });
 
     function setBusy(b) { dlog('ui busy ' + (b ? 1 : 0)); ui('busy', b ? 1 : 0); }
-    function setCancelable(b) { ui('cancel', b ? 1 : 0); }
+    function setCancelable(b) { S.cancelable = !!b; ui('cancel', b ? 1 : 0); }
 
     function launch(job, ctx) {
         var payload = { job: job, mode: LAUNCH_MODE };
@@ -1812,6 +1818,22 @@ var ARABridge = (function (maxThis) {
         setBusy(false);
         ui('guide', 0);
     }
+    // The HTML page asks for everything it may have missed (see the header). Not through say(): no log line, no
+    // change of S.lastLine; the settings are the ones js has been told (Live's saved values arrive at load).
+    function uiRefresh() {
+        ui('setting', 'placement', indexOfVal(PLACEMENTS, S.placement));
+        ui('setting', 'skip', S.realign ? 0 : 1);
+        ui('setting', 'preview', S.preview ? 1 : 0);
+        ui('setting', 'sync', S.sync ? 1 : 0);
+        if (S.hostMissing !== null) ui('host', S.hostMissing ? 0 : 1);
+        if (S.plugins.melodyne !== null || S.plugins.vocalign !== null) {
+            ui('plugins', S.plugins.melodyne ? 1 : 0, S.plugins.vocalign ? 1 : 0);
+        }
+        ui('guide', S.guide ? 1 : 0);
+        ui('cancel', S.cancelable ? 1 : 0);
+        ui('busy', isBusy() ? 1 : 0);
+        if (S.lastLine) { try { outlet(0, sanitize(S.lastLine)); } catch (e) { /* ignore */ } }
+    }
 
     // Every inlet message goes through here: nothing throws into Max.
     var handlers = {
@@ -1833,7 +1855,8 @@ var ARABridge = (function (maxThis) {
         nodeLifecycle: function (args) { nodeLifecycle(args); },
         ready: function () { ready(); },
         refreshPlugins: function () { refreshPlugins(); },
-        loadbang: function () { loadbang(); }
+        loadbang: function () { loadbang(); },
+        uiRefresh: function () { uiRefresh(); }
     };
 
     // A Send within SEND_DEBOUNCE_MS of the end of a job or of the previous accepted Send is ignored (a repeated click,
@@ -1904,6 +1927,7 @@ function nodeLifecycle() { ARABridge.handle('nodeLifecycle', arguments); }
 function ready() { ARABridge.handle('ready', arguments); }
 function refreshPlugins() { ARABridge.handle('refreshPlugins', arguments); }
 function loadbang() { ARABridge.handle('loadbang', arguments); }
+function uiRefresh() { ARABridge.handle('uiRefresh', arguments); }
 function notifydeleted() { ARABridge.handle('notifydeleted', arguments); }
 function bang() { ARABridge.handle('bang', arguments); }
 function anything() {

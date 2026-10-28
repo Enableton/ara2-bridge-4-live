@@ -83,7 +83,7 @@ python3 device/make_amxd.py
 ```
 
 This writes `device/ARABridge.amxd`. The device refers to its scripts by **absolute path inside this checkout**
-(`device/build/bridge.js` and `device/src/runner.js`), so keep the folder where it is, and re-run the command if you move
+(`device/build/bridge.js`, `device/src/runner.js` and the interface `device/ui/ara2bridge_ui.html`), so keep the folder where it is, and re-run the command if you move
 it or after pulling new changes. The path must not contain spaces.
 
 ### 5. Use it in Live
@@ -174,6 +174,7 @@ tools/build_tests.sh                       # host unit tests (CMake only, no SDK
 node device/tests/test_core.js             # device logic
 node device/tests/test_bridge.js           # device against a fake Live (needs a built host for the end-to-end case; --skip-real otherwise)
 node device/tests/test_runner.js
+node device/tests/test_ui.js               # the device's HTML interface (headless Chrome for the behavioural part)
 python3 -I device/tests/test_amxd_container.py
 ```
 

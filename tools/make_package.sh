@@ -34,9 +34,10 @@ echo "2/5 device for $INSTALL_ROOT"
 rm -rf "$OUT"
 mkdir -p "$PKG/device" "$PKG/source"
 python3 device/make_amxd.py --install-root "$INSTALL_ROOT" "$PKG/device/ARABridge.amxd" >/dev/null
-cp device/build/bridge.js device/src/runner.js "$PKG/device/"
+cp device/build/bridge.js device/src/runner.js device/ui/ara2bridge_ui.html "$PKG/device/"
 grep -aq "$INSTALL_ROOT/bridge.js" "$PKG/device/ARABridge.amxd" || die "the .amxd does not refer to $INSTALL_ROOT/bridge.js"
 grep -aq "$INSTALL_ROOT/runner.js" "$PKG/device/ARABridge.amxd" || die "the .amxd does not refer to $INSTALL_ROOT/runner.js"
+grep -aq "$INSTALL_ROOT/ara2bridge_ui.html" "$PKG/device/ARABridge.amxd" || die "the .amxd does not refer to $INSTALL_ROOT/ara2bridge_ui.html"
 if grep -aq "$ROOT" "$PKG/device/ARABridge.amxd"; then die "the .amxd still contains the path of this checkout"; fi
 
 echo "3/5 source archive"

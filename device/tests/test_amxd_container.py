@@ -6,10 +6,11 @@ Checks, without Live or Max:
   - boxes: unique ids, strict port declarations (numinlets/numoutlets/outlettype on EVERY box, counts consistent with
     the object text and with the scripts: js `outlets = 3` in src/bridge.js), every patchline endpoint exists;
   - parameters: unique long names, stored/hidden visibility, menu enums, initial values;
-  - presentation: every UI object is in presentation mode and inside the device rectangle;
+  - presentation: the ONLY presented object is one jweb that fills the device rectangle; the live.* objects that own
+    the saved state are not presented;
   - message flow: a small simulator walks the patch (message boxes, [t], [prepend], [route], [deferlow], [pak],
     [unpack], [expr]) and checks what reaches the js object and node.script for every button, setting, startup,
-    node.script outlet message and js outlet message;
+    node.script outlet message, js outlet message and every message the jweb page can send;
   - nothing reaches js except messages js has a handler for (handler names are read from src/bridge.js);
   - the build is deterministic and the committed .amxd is not stale (byte-identical to a fresh build).
 
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEVICE = os.path.dirname(HERE)
@@ -31,8 +33,10 @@ MAKE = os.path.join(DEVICE, "make_amxd.py")
 BRIDGE_SRC = os.path.join(DEVICE, "src", "bridge.js")
 EXPECTED_JS = os.path.join(DEVICE, "build", "bridge.js")
 EXPECTED_NODE = os.path.join(DEVICE, "src", "runner.js")
+EXPECTED_HTML = os.path.join(DEVICE, "ui", "ara2bridge_ui.html")
 PROBE_AMXD = os.path.join(DEVICE, "probe", "ARABridgeProbe.amxd")
 EXPECTED_HEADER_HEX = "616d706604000000616161616d6574610400000000000000" + "70746368"
+ACTIONS = ["sendMelodyne", "setGuide", "sendVocAlign", "cancel", "refreshPlugins"]
 PAYLOAD_SELECTORS = ["started", "done", "status", "error", "plugins", "copied"]
 
 
@@ -81,7 +85,8 @@ class Sim(object):
         self.js_in = []          # messages received by the js object
         self.node_in = []        # messages received by node.script
         self.live_in = []        # every message a live.* object received: (id, msg)
-        self.comments = {}       # last `set` text per comment id
+        self.web_in = []         # every message the jweb received
+        self.delay = {}          # [delay] id -> pending (True after a bang, False after `stop`)
         self.pak = {}            # pak state per id
         self.expr = {}           # expr inlet values per id
         self.value = {}          # current value of live.menu / live.toggle
@@ -100,17 +105,19 @@ class Sim(object):
         if cls == "message":
             self.fire(bid, 0, atoms(b["text"]))
             return
-        if cls == "comment":
-            if msg and msg[0] == "set":
-                self.comments[bid] = " ".join(str(a) for a in msg[1:])
+        if cls == "jweb":
+            self.web_in.append(msg)
             return
-        if cls in ("live.text", "live.toggle", "live.menu"):
+        if cls in ("live.toggle", "live.menu"):
             self.live_in.append((bid, msg))
             if msg == ("bang",) and cls == "live.menu":
                 self.fire(bid, 0, (self.value[bid],))           # menu: re-outputs its value
             elif msg == ("bang",) and cls == "live.toggle":
                 self.value[bid] = 1 - self.value[bid]           # toggle: a bang FLIPS it and outputs the new value
                 self.fire(bid, 0, (self.value[bid],))
+            elif len(msg) == 1 and isinstance(msg[0], int):
+                self.value[bid] = msg[0]                        # an int sets the value and outputs it
+                self.fire(bid, 0, (msg[0],))
             return
         assert cls == "newobj", cls
         text = b["text"].split(" ")
@@ -119,6 +126,9 @@ class Sim(object):
             self.js_in.append(msg)
         elif head == "node.script":
             self.node_in.append(msg)
+        elif head == "delay":
+            if inlet == 0:
+                self.delay[bid] = msg != ("stop",)
         elif head == "deferlow":
             self.fire(bid, 0, msg)
         elif head == "t":
@@ -199,8 +209,8 @@ class AmxdTest(unittest.TestCase):
 
     def test_patcher_basics(self):
         self.assertEqual(self.p["openinpresentation"], 1)
-        self.assertEqual(self.p["devicewidth"], 330.0)
-        self.assertEqual(self.p["openrect"][2:], [330.0, 169.0])
+        self.assertEqual(self.p["devicewidth"], 800.0)
+        self.assertEqual(self.p["openrect"][2:], [800.0, 169.0])
         self.assertEqual(self.p["appversion"]["major"], 9)
 
     # ------------------------------------------------------------------ boxes and ports
@@ -218,6 +228,9 @@ class AmxdTest(unittest.TestCase):
 
     def test_port_counts_match_object_text(self):
         for bid, b in self.boxes.items():
+            if b["maxclass"] == "jweb":
+                self.assertEqual((b["numinlets"], b["numoutlets"]), (1, 1), bid)    # ONE outlet (Max 9 help patches)
+                continue
             if b["maxclass"] != "newobj":
                 continue
             t = b["text"].split(" ")
@@ -235,6 +248,8 @@ class AmxdTest(unittest.TestCase):
                 self.assertEqual(b["numinlets"], n, bid)
             elif head in ("prepend", "deferlow"):
                 self.assertEqual(b["numoutlets"], 1, bid)
+            elif head == "delay":
+                self.assertEqual((b["numinlets"], b["numoutlets"]), (2, 1), bid)
             elif head == "js":
                 self.assertEqual(b["numoutlets"], js_outlet_count(), "js outlets in bridge.js")
                 self.assertEqual(b["numinlets"], 1)
@@ -251,8 +266,6 @@ class AmxdTest(unittest.TestCase):
         for bid, b in self.boxes.items():
             if b["maxclass"] == "live.menu":
                 self.assertEqual(b["numoutlets"], 3)
-            if b["maxclass"] == "live.text":
-                self.assertEqual(b["numoutlets"], 2)
             if b["maxclass"] == "live.toggle":
                 self.assertEqual(b["numoutlets"], 1)
 
@@ -293,7 +306,12 @@ class AmxdTest(unittest.TestCase):
         self.assertTrue(jp.startswith("/") and jp.endswith("/device/build/bridge.js"), jp)
         self.assertTrue(np_.startswith("/") and np_.endswith("/device/src/runner.js"), np_)
         self.assertEqual(jp[:-len("/device/build/bridge.js")], np_[:-len("/device/src/runner.js")], "same repo root")
-        for pth in (jp, np_):
+        read = self.boxes["obj-msg-readfile"]["text"]
+        self.assertTrue(read.startswith("readfile /") and read.endswith("/device/ui/ara2bridge_ui.html"), read)
+        hp = read[len("readfile "):]
+        self.assertEqual(hp[:-len("/device/ui/ara2bridge_ui.html")], jp[:-len("/device/build/bridge.js")], "same repo root")
+        self.assertEqual(self.boxes["obj-msg-url"]["text"], "url file://" + urllib.parse.quote(hp))
+        for pth in (jp, np_, hp):
             self.assertNotIn(" ", pth)
 
     def test_scripts_exist_in_this_checkout(self):
@@ -301,7 +319,8 @@ class AmxdTest(unittest.TestCase):
         self.assertEqual(self.baked_js_path(), EXPECTED_JS)
         node = [b["text"] for b in self.boxes.values() if b.get("text", "").startswith("node.script ")]
         self.assertEqual(node[0], "node.script %s @autostart 1 @watch 0" % EXPECTED_NODE)
-        for pth in (EXPECTED_JS, EXPECTED_NODE):
+        self.assertEqual(self.boxes["obj-msg-readfile"]["text"], "readfile " + EXPECTED_HTML)
+        for pth in (EXPECTED_JS, EXPECTED_NODE, EXPECTED_HTML):
             self.assertTrue(os.path.isfile(pth), pth)
 
     def test_audio_passthrough(self):
@@ -319,7 +338,8 @@ class AmxdTest(unittest.TestCase):
 
     def test_parameters(self):
         pbs = self.param_boxes()
-        self.assertEqual({b["maxclass"] for b in pbs}, {"live.menu", "live.text", "live.toggle"})
+        self.assertEqual({b["maxclass"] for b in pbs}, {"live.menu", "live.toggle"})
+        self.assertEqual(len(pbs), 4, "placement + three toggles; the buttons are page-only")
         names, varnames = set(), set()
         for b in pbs:
             v = b["saved_attribute_attributes"]["valueof"]
@@ -332,13 +352,9 @@ class AmxdTest(unittest.TestCase):
             self.assertEqual(b["varname"], v["parameter_longname"])
             self.assertIn("parameter_enum", v)
             self.assertEqual(v["parameter_mmax"], float(len(v["parameter_enum"]) - 1), b["id"])
-            if b["maxclass"] == "live.text":
-                self.assertEqual(b["mode"], 0)
-                self.assertEqual(v["parameter_invisible"], 2, "buttons are hidden parameters")
-            else:
-                self.assertEqual(v["parameter_invisible"], 1, "settings are stored with the set")
-                self.assertEqual(v["parameter_initial_enable"], 1)
-                self.assertTrue(0 <= v["parameter_initial"][0] <= v["parameter_mmax"])
+            self.assertEqual(v["parameter_invisible"], 1, "settings are stored with the set")
+            self.assertEqual(v["parameter_initial_enable"], 1)
+            self.assertTrue(0 <= v["parameter_initial"][0] <= v["parameter_mmax"])
         self.assertEqual(set(self.p["parameters"]), {b["id"] for b in pbs})
         for b in pbs:
             ln, sn, zero = self.p["parameters"][b["id"]]
@@ -353,82 +369,105 @@ class AmxdTest(unittest.TestCase):
         self.assertEqual(valueof("obj-t-norealign")["parameter_initial"], [0])      # inverted: 0 = realign ON (bridge default)
         self.assertEqual(valueof("obj-t-norealign")["parameter_longname"], "Skip realign")
         self.assertEqual(valueof("obj-t-norealign")["parameter_shortname"], "NoRealign")
-        self.assertEqual(self.boxes["obj-lnorealign"]["text"], "Skip timing fix")
         self.assertEqual(valueof("obj-t-preview")["parameter_initial"], [1])        # Live preview is on for a new device
         self.assertEqual(valueof("obj-t-preview")["parameter_longname"], "Live preview")
         self.assertEqual(valueof("obj-t-preview")["parameter_shortname"], "Preview")
-        self.assertEqual(self.boxes["obj-lpreview"]["text"], "Preview")
         self.assertEqual(valueof("obj-t-sync")["parameter_initial"], [1])           # transport sync is on for a new device
         self.assertEqual(valueof("obj-t-sync")["parameter_longname"], "Sync transport")
         self.assertEqual(valueof("obj-t-sync")["parameter_shortname"], "Sync")
-        self.assertEqual(self.boxes["obj-lsync"]["text"], "Sync transport")
+        with open(EXPECTED_HTML, "r", encoding="utf-8") as f:
+            page = f.read()
+        for label in ("Skip timing fix", "Preview", "Sync transport", "Take lane", "New track", "Replace",
+                      "Send to Melodyne", "Set guide", "Send to VocAlign", "Cancel", "Refresh plug-ins"):
+            self.assertIn(label, page, label)
         with open(BRIDGE_SRC, "r", encoding="utf-8") as f:
             src = f.read()
         self.assertIn("var PLACEMENTS = ['takeLane', 'newTrack', 'replace'];", src)
         self.assertIn("realign: true,", src)
 
     # ------------------------------------------------------------------ presentation
-    def test_presentation_fits_device(self):
-        w = self.p["devicewidth"]
-        h = self.p["openrect"][3]
-        shown = []
+    def test_presentation_is_one_jweb_filling_the_device(self):
+        shown = [b for b in self.boxes.values() if b.get("presentation") == 1]
+        self.assertEqual([b["id"] for b in shown], ["obj-web"])
+        self.assertEqual(shown[0]["maxclass"], "jweb")
+        self.assertEqual(shown[0]["presentation_rect"], [0.0, 0.0, self.p["devicewidth"], self.p["openrect"][3]])
+        self.assertEqual(self.p["openrect"][3], 169.0)
+        # everything that owns state is out of presentation
         for b in self.boxes.values():
-            if b["maxclass"] in ("live.text", "live.toggle", "live.menu", "comment"):
-                self.assertEqual(b.get("presentation"), 1, b["id"])
-            if b.get("presentation") == 1:
-                x, y, bw, bh = b["presentation_rect"]
-                self.assertGreaterEqual(x, 0, b["id"])
-                self.assertGreaterEqual(y, 0, b["id"])
-                self.assertLessEqual(x + bw, w, b["id"])
-                self.assertLessEqual(y + bh, h, b["id"])
-                shown.append(b["id"])
-        non_ui = [b["id"] for b in self.boxes.values() if b["maxclass"] == "newobj" and b.get("presentation") == 1]
-        self.assertEqual(non_ui, [])
-        self.assertEqual(len(shown), 15)
+            if b["maxclass"].startswith("live.") and b["maxclass"] != "live.thisdevice":
+                self.assertEqual(b.get("presentation"), 0, b["id"])
 
-    def test_presentation_objects_do_not_overlap(self):
-        rects = [(b["id"], b["presentation_rect"]) for b in self.boxes.values() if b.get("presentation") == 1]
-        for i in range(len(rects)):
-            for j in range(i + 1, len(rects)):
-                (a, ra), (b, rb) = rects[i], rects[j]
-                overlap = ra[0] < rb[0] + rb[2] and rb[0] < ra[0] + ra[2] and ra[1] < rb[1] + rb[3] and rb[1] < ra[1] + ra[3]
-                self.assertFalse(overlap, "%s overlaps %s" % (a, b))
-
-    def test_title_and_version(self):
-        title = self.boxes["obj-title"]
-        self.assertTrue(re.match(r"^ARA2 Bridge 4 Live +v\d+\.\d+$", title["text"]), title["text"])
-        self.assertEqual(title["presentation"], 1)
+    def test_page_title_and_version(self):
+        with open(EXPECTED_HTML, "r", encoding="utf-8") as f:
+            page = f.read()
+        with open(MAKE, "r", encoding="utf-8") as f:
+            version = re.search(r'^VERSION = "([^"]+)"', f.read(), re.M).group(1)
+        self.assertTrue(re.search(r"<h1>ARA2 Bridge <em>4 Live</em></h1>\s*<span>v%s</span>" % re.escape(version), page))
 
     # ------------------------------------------------------------------ message flow
-    def test_buttons_send_the_exact_message_to_js(self):
-        want = {"obj-b-mel": "sendMelodyne", "obj-b-guide": "setGuide", "obj-b-voc": "sendVocAlign",
-                "obj-b-cancel": "cancel", "obj-b-refresh": "refreshPlugins"}
-        labels = {"obj-b-mel": "Send to Melodyne", "obj-b-guide": "Set guide (VocAlign)", "obj-b-voc": "Send to VocAlign",
-                  "obj-b-cancel": "Cancel", "obj-b-refresh": "Refresh plug-ins"}
-        # whichever form Live emits for ONE click: a lone bang, a lone 1, or 1 on press and 0 on release
-        clicks = {"bang": [("bang",)], "1": [(1,)], "1 then 0": [(1,), (0,)], "bang then 0": [("bang",), (0,)]}
-        for bid, msg in want.items():
-            self.assertEqual(self.boxes[bid]["text"], labels[bid])
-            for name, seq in clicks.items():
-                s = self.sim()
-                for m in seq:
-                    s.inject(bid, 0, m)
-                self.assertEqual(s.js_in, [(msg,)], "%s: one click (%s) must give exactly one message" % (bid, name))
-                self.assertEqual(s.node_in, [])
+    def test_page_actions_send_the_exact_message_to_js(self):
+        for msg in ACTIONS:
             s = self.sim()
-            s.inject(bid, 0, (0,))
-            self.assertEqual(s.js_in, [], "a lone release (0) must not send")
+            s.inject("obj-web", 0, ("ui_action", msg))
+            self.assertEqual(s.js_in, [(msg,)], msg)
+            self.assertEqual(s.node_in, [])
+            self.assertEqual(s.live_in, [])
+            self.assertIn(msg, self.handlers)
+            self.assertEqual(self.boxes["obj-act-%s-msg" % msg]["text"], msg)
             s = self.sim()
-            for _ in range(2):          # two clicks, two messages
-                s.inject(bid, 0, (1,))
-                s.inject(bid, 0, (0,))
-            self.assertEqual(s.js_in, [(msg,), (msg,)])
-            # the path: live.text -> [route bang 1] -> [t b] -> message box -> js
-            self.assertEqual(self.boxes[bid + "-gate"]["text"], "route bang 1")
-            self.assertEqual(self.boxes[bid + "-trig"]["text"], "t b")
-            self.assertEqual(self.boxes[bid + "-msg"]["maxclass"], "message")
-            self.assertEqual(self.boxes[bid + "-msg"]["text"], msg)
-        self.assertFalse(any(b.get("text", "").startswith("sel ") for b in self.boxes.values()))
+            for _ in range(2):
+                s.inject("obj-web", 0, ("ui_action", msg))
+            self.assertEqual(s.js_in, [(msg,), (msg,)], "two clicks, two messages")
+
+    def test_only_the_three_page_selectors_pass_the_jweb_outlet(self):
+        """jweb's one outlet also says onloadstart/onloadend/url/title: none of that, nor an unknown name, goes on."""
+        junk = [("onloadstart",), ("onloadend", 200), ("url", "file:///x.html"), ("title", "ARA2"), ("ui_action", "bogus"),
+                ("ui_set", "bogus", 1), ("ui_actionX", "cancel"), ("cancel",), ("sendMelodyne",), ("ui_state", "busy", 1)]
+        for m in junk:
+            s = self.sim()
+            s.inject("obj-web", 0, m)
+            self.assertEqual((s.js_in, s.node_in, s.live_in, s.web_in), ([], [], [], []), m)
+        lines = [l["patchline"] for l in self.p["lines"] if l["patchline"]["source"][0] == "obj-web"]
+        self.assertEqual([(l["source"][1], l["destination"][0]) for l in lines], [(0, "obj-route-ui")])
+
+    def test_page_settings_reach_the_live_objects_then_js_and_come_back_to_the_page(self):
+        cases = [("placement", 2, "obj-menu-place", ("settings", "placement", 2)),
+                 ("placement", 0, "obj-menu-place", ("settings", "placement", 0)),
+                 ("skip", 1, "obj-t-norealign", ("settings", "realign", 0)),
+                 ("skip", 0, "obj-t-norealign", ("settings", "realign", 1)),
+                 ("preview", 1, "obj-t-preview", ("settings", "preview", 1)),
+                 ("preview", 0, "obj-t-preview", ("settings", "preview", 0)),
+                 ("sync", 1, "obj-t-sync", ("settings", "sync", 1)),
+                 ("sync", 0, "obj-t-sync", ("settings", "sync", 0))]
+        for name, v, target, js_msg in cases:
+            s = self.sim()
+            s.inject("obj-web", 0, ("ui_set", name, v))
+            self.assertEqual(s.live_in, [(target, (v,))], (name, v))      # the live object owns (and saves) the value
+            self.assertEqual(s.js_in, [js_msg], (name, v))
+            self.assertEqual(s.web_in, [("ui_state", "setting", name, v)], "the page is told what Live now holds")
+        s = self.sim()
+        s.inject("obj-web", 0, ("ui_set", "placement", 1)); s.inject("obj-web", 0, ("ui_set", "placement", 2))
+        self.assertEqual(s.js_in, [("settings", "placement", 1), ("settings", "placement", 2)])
+
+    def test_page_loaded_asks_js_to_refresh_and_stops_the_fallback_timer(self):
+        s = self.sim()
+        s.inject("obj-thisdev", 0, ("bang",))
+        self.assertTrue(s.delay["obj-load-delay"], "the url fallback is armed at startup")
+        s.inject("obj-web", 0, ("ui_loaded",))
+        self.assertFalse(s.delay["obj-load-delay"], "the page loaded: no fallback")
+        self.assertEqual(s.js_in[-1], ("uiRefresh",))
+        self.assertIn("uiRefresh", self.handlers)
+
+    def test_a_page_that_never_loads_is_loaded_again_with_a_url(self):
+        s = self.sim()
+        s.inject("obj-thisdev", 0, ("bang",))
+        read = self.boxes["obj-msg-readfile"]["text"]
+        self.assertEqual(s.web_in[0], tuple(read.split(" ")), "readfile comes first")
+        delay = self.boxes["obj-load-delay"]["text"]
+        self.assertEqual(delay, "delay 5000")
+        s.inject("obj-load-delay", 0, ("bang",))      # the timer ran out
+        self.assertEqual(s.web_in[-1], tuple(self.boxes["obj-msg-url"]["text"].split(" ")))
+        self.assertTrue(s.web_in[-1][1].startswith("file:///"))
 
     def test_settings_messages(self):
         s = self.sim()
@@ -438,6 +477,9 @@ class AmxdTest(unittest.TestCase):
         s.inject("obj-t-norealign", 0, (0,))
         self.assertEqual(s.js_in, [("settings", "placement", 2), ("settings", "placement", 1),
                                    ("settings", "realign", 0), ("settings", "realign", 1)])
+        # the raw toggle value (skip) is what the page gets, not the inverted realign value
+        self.assertEqual(s.web_in, [("ui_state", "setting", "placement", 2), ("ui_state", "setting", "placement", 1),
+                                    ("ui_state", "setting", "skip", 1), ("ui_state", "setting", "skip", 0)])
 
     def test_startup_sends_saved_settings_then_ready(self):
         s = self.sim()
@@ -454,6 +496,7 @@ class AmxdTest(unittest.TestCase):
         self.assertEqual(s.js_in, [("settings", "placement", 2), ("ready",)])
         self.assertEqual(s.value["obj-t-norealign"], 1)
         self.assertNotIn(("refreshPlugins",), s.js_in)
+        self.assertEqual(s.web_in[-1], ("ui_state", "setting", "placement", 2))
 
     def test_skip_realign_toggle_maps_to_realign(self):
         # Live outputs the (restored or initial) toggle value by itself; 0 -> realign 1, 1 -> realign 0
@@ -461,6 +504,7 @@ class AmxdTest(unittest.TestCase):
             s = self.sim()
             s.inject("obj-t-norealign", 0, (v,))
             self.assertEqual(s.js_in, [("settings", "realign", want)])
+            self.assertEqual(s.web_in, [("ui_state", "setting", "skip", v)])
 
     def test_live_preview_toggle_maps_to_preview(self):
         # on (1) asks the host for previews, off (0) does not; nothing is sent at startup (the toggle is never banged)
@@ -468,6 +512,7 @@ class AmxdTest(unittest.TestCase):
             s = self.sim()
             s.inject("obj-t-preview", 0, (v,))
             self.assertEqual(s.js_in, [("settings", "preview", v)])
+            self.assertEqual(s.web_in, [("ui_state", "setting", "preview", v)])
             self.assertEqual(s.node_in, [])
         s = self.sim()
         s.inject("obj-thisdev", 0, ("bang",))
@@ -479,6 +524,7 @@ class AmxdTest(unittest.TestCase):
             s = self.sim()
             s.inject("obj-t-sync", 0, (v,))
             self.assertEqual(s.js_in, [("settings", "sync", v)])
+            self.assertEqual(s.web_in, [("ui_state", "setting", "sync", v)])
             self.assertEqual(s.node_in, [])
 
     def test_node_outlet0_reaches_host_prepends_with_the_right_selectors(self):
@@ -518,8 +564,13 @@ class AmxdTest(unittest.TestCase):
         s.inject("obj-js", 1, ("findplugins",))
         self.assertEqual(s.node_in[1:], [("cancel",), ("findplugins",)])
         s = self.sim()
-        s.inject("obj-js", 0, ("Sent", "to", "Melodyne."))
-        self.assertEqual(s.comments["obj-status"], "Sent to Melodyne.")
+        s.inject("obj-js", 0, ("Sent to Melodyne.",))
+        self.assertEqual(s.web_in, [("ui_status", "Sent to Melodyne.")])
+        s.inject("obj-js", 2, ("busy", 1))
+        s.inject("obj-js", 2, ("plugins", 1, 0))
+        s.inject("obj-js", 2, ("setting", "placement", 2))
+        self.assertEqual(s.web_in[1:], [("ui_state", "busy", 1), ("ui_state", "plugins", 1, 0),
+                                        ("ui_state", "setting", "placement", 2)])
         self.assertEqual(s.js_in, [])
 
     def test_no_ui_state_reaches_live_objects(self):
@@ -528,15 +579,21 @@ class AmxdTest(unittest.TestCase):
         into_live = {(l["patchline"]["source"][0], l["patchline"]["destination"][0]) for l in self.p["lines"]
                      if self.boxes[l["patchline"]["destination"][0]]["maxclass"].startswith("live.")
                      and self.boxes[l["patchline"]["destination"][0]]["maxclass"] != "live.thisdevice"}
-        self.assertEqual(into_live, {("obj-tstart", "obj-menu-place")})
-        # js outlet 2 (busy/cancel/plugins/host/guide) is not connected to anything
-        self.assertFalse([l for l in self.p["lines"] if l["patchline"]["source"] == ["obj-js", 2]])
+        self.assertEqual(into_live, {("obj-tstart", "obj-menu-place"), ("obj-route-set", "obj-menu-place"),
+                                     ("obj-route-set", "obj-t-norealign"), ("obj-route-set", "obj-t-preview"),
+                                     ("obj-route-set", "obj-t-sync")})
+        # js outlet 2 (busy/cancel/plugins/host/guide/setting) goes to the page only
+        outs = [l["patchline"]["destination"][0] for l in self.p["lines"] if l["patchline"]["source"] == ["obj-js", 2]]
+        self.assertEqual(outs, ["obj-pre-ui-state"])
+        self.assertEqual([l["patchline"]["destination"][0] for l in self.p["lines"] if l["patchline"]["source"][0] == "obj-pre-ui-state"], ["obj-web"])
         s = self.sim()
         s.inject("obj-thisdev", 0, ("bang",))
         n = len(s.live_in)
-        for m in (("busy", 1), ("cancel", 1), ("plugins", 1, 0), ("host", 1), ("guide", 1), ("busy", 0)):
+        for m in (("busy", 1), ("cancel", 1), ("plugins", 1, 0), ("host", 1), ("guide", 1), ("busy", 0),
+                  ("setting", "preview", 1)):
             s.inject("obj-js", 2, m)
         self.assertEqual(len(s.live_in), n)
+        self.assertEqual(s.value["obj-t-preview"], 1, "the page-bound setting echo never writes a live object")
         self.assertEqual(s.node_in, [])
 
     def test_only_known_messages_reach_js(self):

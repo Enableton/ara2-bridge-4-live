@@ -14,13 +14,13 @@ die() { echo "FEHLER: $*" >&2; exit 1; }
 [ -n "${HOME:-}" ] || die "HOME ist nicht gesetzt."
 [ "$(uname -s)" = "Darwin" ] || die "Dieses Paket läuft nur auf dem Mac."
 [ "$(uname -m)" = "arm64" ] || die "Dieses Paket braucht einen Mac mit Apple-Silicon-Chip (M1 oder neuer)."
-for f in BridgeHost device/ARABridge.amxd device/bridge.js device/runner.js; do
+for f in BridgeHost device/ARABridge.amxd device/bridge.js device/runner.js device/ara2bridge_ui.html; do
     [ -f "$HERE/$f" ] || die "Im Paket fehlt $f. Bitte das ZIP neu entpacken."
 done
 
 echo "1/4  Geräte-Dateien nach $SHARED/device"
 mkdir -p "$SHARED/device" || die "Konnte $SHARED nicht anlegen."
-for f in ARABridge.amxd bridge.js runner.js; do
+for f in ARABridge.amxd bridge.js runner.js ara2bridge_ui.html; do
     cp "$HERE/device/$f" "$SHARED/device/$f" || die "Konnte $f nicht nach $SHARED/device kopieren (Rechte?)."
 done
 chmod -R a+rX "$SHARED" 2>/dev/null || true

@@ -651,7 +651,7 @@ const es5Violations = (src) => ES6_PATTERNS.filter((p) => p[0].test(codeOnly(src
 
 const MESSAGES = ['anything', 'bang', 'cancel', 'hostCopied', 'hostDone', 'hostError', 'hostPlugins', 'hostPong', 'hostStarted',
   'hostStatus', 'loadbang', 'nodeLifecycle', 'notifydeleted', 'placement', 'ready', 'realign', 'refreshPlugins', 'sendMelodyne', 'sendVocAlign',
-  'setGuide', 'settings'];
+  'setGuide', 'settings', 'uiRefresh'];
 
 test('built file: ES5 only, node --check, core first, the scanner works', () => {
   assert.deepStrictEqual(es5Violations(BUILT_SRC), []);
@@ -694,6 +694,38 @@ test('ready: status liveness probe every 2 s until a reply, then findplugins; pl
   fx.pump(20000);
   assert.strictEqual(fx.runner.statusReqs, 4, 'no more probes once alive');
   assert.ok(fx.sb.outs[1].every((m) => m[0] !== 'ping'), 'ping/pong is not used for liveness');
+});
+
+test('uiRefresh: a page that loads late gets the last status and the whole UI state (settings, host, plugins, guide, busy)', () => {
+  const fx = makeFixture({ runner: { plugins: { melodyne: { found: true }, vocalign: { found: false, problem: 'none' } } } });
+  fx.boot();
+  fx.sb.settings('placement', 2, 'realign', 0, 'preview', 1, 'sync', 1);
+  const before = fx.sb.outs[0].length;
+  fx.sb.outs[2].length = 0;
+  fx.sb.uiRefresh();
+  assert.deepStrictEqual(fx.sb.outs[2].filter((a) => a[0] === 'setting').map((a) => a.slice(1)),
+    [['placement', 2], ['skip', 1], ['preview', 1], ['sync', 1]]);
+  assert.deepStrictEqual(fx.lastUi('host'), [1]);
+  assert.deepStrictEqual(fx.lastUi('plugins'), [1, 0]);
+  assert.deepStrictEqual(fx.lastUi('guide'), [0]);
+  assert.deepStrictEqual(fx.lastUi('busy'), [0]);
+  assert.deepStrictEqual(fx.lastUi('cancel'), [0]);
+  assert.strictEqual(fx.sb.outs[0].length, before + 1, 'exactly one status line re-sent');
+  assert.strictEqual(fx.status(), 'Ready. Melodyne: found. VocAlign: not found.');
+  fx.sb.sendMelodyne(); fx.pump(0);
+  fx.sb.outs[2].length = 0;
+  fx.sb.uiRefresh();
+  assert.deepStrictEqual(fx.lastUi('busy'), [1], 'busy while a job runs');
+  assert.deepStrictEqual(fx.lastUi('cancel'), [1], 'cancelable while the host runs');
+});
+
+test('uiRefresh before anything is known: settings and busy only, no host/plugins/status', () => {
+  const fx = makeFixture();
+  fx.sb.loadbang();
+  fx.sb.outs[0].length = 0; fx.sb.outs[2].length = 0;
+  fx.sb.uiRefresh();
+  assert.strictEqual(fx.sb.outs[0].length, 0);
+  assert.deepStrictEqual(fx.sb.outs[2].map((a) => a[0]).sort(), ['busy', 'cancel', 'guide', 'setting', 'setting', 'setting', 'setting']);
 });
 
 test('ready: gives up after 15 probes with a message; sends are refused before ready and before the runner answers', () => {

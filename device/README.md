@@ -18,6 +18,8 @@ old folder: run `python3 device/make_amxd.py` there first.
 | `tests/test_core.js` | Tests for `core.js`: `node device/tests/test_core.js` (exit code 1 on failure). Includes an ES5 scan. |
 | `tests/fixtures/` | Raw LiveAPI values of three real clips measured in Live 12.4.6 (trimmed unwarped, warped, untouched unwarped). |
 | `src/bridge.js` | Max classic `js` side (ES5): reads the selected clip through LiveAPI, validates it, sends the job to the runner, copies the result through the runner and executes the placement plan with verification and rollback. Message forms in its header. |
+| `ui/ara2bridge_ui.html` | The device's face: ONE self-contained HTML page (no remote assets, system fonts) shown in a `jweb` object of 800 x 169 px. It keeps no saved state (the `live.*` objects do) and talks to the patch with `window.max.outlet` / `bindInlet`: out `ui_action <name>`, `ui_set <placement\|skip\|preview\|sync> <value>`, `ui_loaded`; in `ui_state ...` and `ui_status <text>` (header of the file). Without Max it runs in a demo mode that answers itself: open the file in a browser to see it. |
+| `tests/test_ui.js` | `node device/tests/test_ui.js`: no remote URLs; every control sends exactly its own message; values from Max change the page and are never sent back; fills the jweb. The behavioural part needs Chrome (skipped otherwise). |
 | `src/runner.js` | Node for Max side: job folders, BridgeHost launch and supervision, `--find-plugins`, result copy. |
 | `build.py` | `python3 device/build.py` concatenates `src/core.js` + `src/bridge.js` into `build/bridge.js` (Max's `js` has no module loader), then runs the ES5 scan and `node --check`. `build/` is generated and git-ignored; the `.amxd` refers to `build/bridge.js` by absolute path, so `make_amxd.py` runs `build.py` first. |
 | `tests/test_bridge.js` | `node device/tests/test_bridge.js [--skip-real]`: builds, then runs the built file against a fake Live (measured LOM quirks, delayed visibility, fault injection), a fake runner, and once end to end through the real runner and the real BridgeHost `--autorender`. |
@@ -36,12 +38,14 @@ old folder: run `python3 device/make_amxd.py` there first.
    run at least `python3 device/build.py` after every checkout, pull or branch switch that touches `device/src/`; then
    remove and re-add the device in Live. Do not move or rename the repo folder (or re-run `make_amxd.py` if you do).
 3. In Live drag `device/ARABridge.amxd` from Finder onto an **audio track** (it is an Audio Effect; audio passes
-   through unchanged). Use the track that holds the clip. The device is 330 px wide.
+   through unchanged). Use the track that holds the clip. The device is 800 px wide and 169 px high (the maximum height of a device in Live); its whole face is one HTML page.
 4. Within a few seconds the status line says `Ready. <plug-in report>`. If it keeps saying "Starting..." or "Waiting for
    it...", the Node script did not start: remove the device and add it again, and look at Live's Max console
    (Options > Max Window Console... or Max's Console) for lines starting `ARABridge:`.
 
 ## The device
+
+The page shows the status as two lines at the bottom (Max's console and `device.log` have the full text), the plug-in check as two chips (Melodyne / VocAlign: checking, found, not found, no host), a blinking LED plus a sweeping bar while a job runs, and a red **Cancel** while a job can be cancelled. Buttons are dimmed while busy, never disabled.
 
 | Control | Does |
 |---|---|
@@ -51,12 +55,12 @@ old folder: run `python3 device/make_amxd.py` there first.
 | **Skip realign** toggle, label "Skip timing correction" (Melodyne only, default off) | Inverted on purpose so that realign is ON by default whatever Live restores for a fresh device: the patch sends `settings realign <1 - toggle>`. Switch it on to send `settings realign 0`. |
 | **Live preview** toggle, label "Preview" (Melodyne, on for a new device) | Sent as `settings preview <0\|1>` and written into the next Melodyne job as `"preview": true`. With it on, the host renders the clip again after every edit (0.12 s after the last change) and the device plays the result from **two Preview tracks, A and B, that take turns** right below the source track: the new clip is put onto the silent one (Live has time to load it, `ram_mode` is set if Live has it), then the tracks swap their mute state and the old clip is removed, so the edit is heard without a gap. Live plays the clip itself, so it is in sync with all other tracks. The preview skips the timing correction (it would take seconds on a long clip for a shift of well under a millisecond); the result you apply still has it. **The source clip is muted while a preview plays** (only that clip, not its track, so other clips on the track keep playing; a clip you had muted yourself is left alone) and unmuted again when you press Apply (before the result is placed), Cancel, or the job ends any other way. Undo steps pile up while you edit. A failed preview never removes the audible one; a deleted Preview track is made again. If Live refuses a step, the status says "No preview: ..." and the job goes on. `device.log` has the time each preview took from the host's publish to the swap. |
 | **Sync transport** toggle, label "Sync transport" (Melodyne, on for a new device) | Sent as `settings sync <0\|1>` and written into the next Melodyne job as `"sync": true`. With it on, Live's transport and the host window stay together: Play, Stop and the playhead in Live move the cursor in Melodyne's window (its playback is silent; you hear Live), and Play, Space, Stop or a click in Melodyne's time ruler start, stop or move Live. Works best together with **Preview**: the Preview track is what plays the edit in Live. Constant tempo only (a tempo change pauses it with a note). The device reads Live's position every 40 ms (the Live API is not sample accurate, so expect the cursor to be within a few tens of milliseconds). |
-| **Cancel** | Always clickable; says `Nothing to cancel.` when idle. Cancelling is not possible while the result is being placed. |
+| **Cancel** | Always clickable (red while there is a job to cancel); says `Nothing to cancel.` when idle. Cancelling is not possible while the result is being placed. |
 | **Refresh plug-ins** | Re-runs the host's plug-in check (after installing the host or a plug-in). |
-| Status box | Last message of the device (below). Nothing is greyed: while a job is busy a second Send is refused with a status message (enforced in bridge.js). |
+| Status line | Last message of the device (below). Nothing is disabled: while a job is busy a second Send is refused with a status message (enforced in bridge.js). |
 
-On load (and when a saved set is opened) the device bangs the Placement menu so its saved value is re-sent to the script; the Skip realign toggle is deliberately NOT banged (a bang flips a `live.toggle`), Live outputs its restored value itself and the script defaults to realign on. The patch sends `ready` to the script afterwards
-before it says `ready`.
+On load (and when a saved set is opened) the device loads the page, bangs the Placement menu so its saved value is re-sent to the script; the Skip realign toggle is deliberately NOT banged (a bang flips a `live.toggle`), Live outputs its restored value itself and the script defaults to realign on. The patch sends `ready` to the script afterwards
+before it says `ready`. The page may load after all of that: when its handlers are bound it sends `ui_loaded`, the patch sends `uiRefresh` to the script, and the script re-emits its settings, state and last status line to the page. If the page has not said `ui_loaded` 5 s after `readfile <abs path>`, the patch loads it once more with `url file://<abs path>` (nobody has tried yet whether a `jweb` in Live resolves the absolute `readfile` path).
 
 ## Reading the status
 
@@ -88,17 +92,24 @@ click can be traced. A Send within 1.5 s of the end of a job or of the previous 
 
 - No `active`/greying messages are sent to any `live.*` object after load: they made a button emit by itself and launched a
   second job. The Plug-in menu was removed because it could only grey buttons. The UI state outlet of the script
-  (`busy`, `cancel`, ...) is not connected.
-- Each button goes `live.text -> [route bang 1] -> [t b] -> message -> js`. A bang or a 1 passes, a 0 (release) is dropped, so
-  one click gives one message whichever form Live emits (lone bang, lone 1, or 1 then 0). `[sel 1]` would drop a bang
-  (dead button) and a bare `[t b]` would fire twice on 1/0.
+  (`busy`, `cancel`, ...) now goes to the HTML page only (`[prepend ui_state] -> jweb`), never to a `live.*` object, and
+  the page only dims.
+- The `live.menu` and the three `live.toggle` objects still exist (not presented): they own the saved values, so a set
+  saved with an older (native UI) build keeps its placement and switches. The page sets them with an int (`ui_set`), and
+  every output of theirs is tapped to the page (`ui_state setting <name> <value>`; `skip` is the raw toggle value), so a
+  value restored by Live reaches the page too. The old hidden `live.text` buttons are gone: each page button is a
+  `ui_action <name>` that [route] turns into a message box to the script (one click, one message; the page itself sends
+  one message per click).
+- `jweb` has ONE outlet: it carries the page's `max.outlet` messages AND onloadstart, onloadend, url and title. Only
+  `ui_action`, `ui_set` and `ui_loaded` are routed on, everything else is dropped.
+- No `color-mix()` and no remote fonts in the page: the Chromium in Live's `jweb` may be older than the one in a browser.
 
 ## Not verified outside Live
 
-The container, ports, parameters, presentation rectangles and the message flow are tested without Live
-(`test_amxd_container.py`). The following can only be checked in Live: that Live accepts the file, the panel layout,
-what a `live.text` button actually emits on a click (the simulator covers bang, 1, and 1 then 0) and that `[route bang 1]`
-matches a bang, the exact lifecycle messages of node.script's right outlet (`terminated`, `restarted`), that the saved
+The container, ports, parameters, the jweb rectangle and the message flow (page to js, live objects, and back) are tested
+without Live (`test_amxd_container.py`), the page's own behaviour in headless Chrome (`test_ui.js`). The following can
+only be checked in Live: that Live accepts the file, that the `jweb` finds and renders the page (`readfile` with an
+absolute path, or the `url` fallback), that clicks, the dropdown and the switches work in Live's `jweb`, the exact lifecycle messages of node.script's right outlet (`terminated`, `restarted`), that the saved
 Placement and Skip realign values come back after reopening a set (the menu is re-output by the startup bang, the
 toggle by Live itself), and `route` behaviour with long single-symbol payloads.
 
@@ -158,7 +169,7 @@ Things the fake Live in `tests/test_bridge.js` cannot prove; run them in a throw
     - Umlaut and emoji clip/track names.
     - An MP3 or M4A source on the timeline.
     - The saved Placement and Skip realign values surviving a set reopen.
-    - `live.text` emitting once per long press.
+    - The page: renders, every control does its job, a duplicated device behaves the same.
 
 ## Known limits
 
@@ -170,8 +181,8 @@ Things the fake Live in `tests/test_bridge.js` cannot prove; run them in a throw
   placed; there is no recovery in v1.
 - **Take lane / New track** do not refuse a source deleted or moved to another track while the host was open.
 - **Take lanes** cannot be deleted through Live's API: a rolled-back take-lane placement leaves an empty lane.
-- **The UI state outlet** of the script (busy, cancel, ...) is not connected in the patch (nothing is greyed); a second
-  Send while busy is refused with a status message instead.
+- **The UI state outlet** of the script (busy, cancel, ...) only dims the page; a second Send while busy is refused with a
+  status message instead.
 
 ## Troubleshooting
 

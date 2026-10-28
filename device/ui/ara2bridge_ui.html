@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARA2 Bridge 4 Live</title>
+<!--
+  Interface of the ARA2 Bridge 4 Live device (Max for Live, shown in a [jweb]). One file, no remote assets, system fonts.
+
+  The page holds NO saved state: placement and the three switches live in the device's live.menu / live.toggle objects
+  (saved with the Live set), the page only mirrors them. Every control sends ONE message of its own to Max:
+      ui_action <sendMelodyne|setGuide|sendVocAlign|cancel|refreshPlugins>
+      ui_set <placement 0-2 | skip 0-1 | preview 0-1 | sync 0-1>
+      ui_loaded                                  (once, after the handlers below are registered)
+  and receives (inlet names are prefixed; a value coming from Max is applied silently and never sent back):
+      ui_status <text>                           the device's status line
+      ui_state busy <0|1> | cancel <0|1> | host <0|1> | plugins <melodyne> <vocalign> | guide <0|1>
+               | setting <placement|skip|preview|sync> <value>
+  Without window.max (a normal browser) the page runs in a demo mode that answers itself, for previews.
+-->
+<style>
+  :root {
+    --bg:        #1f2022;
+    --panel:     #292a2d;
+    --panel-hi:  #323337;
+    --line:      #3a3b40;
+    --text:      #e6e3dc;
+    --dim:       #8b8d93;
+    --faint:     #5c5e64;
+    --live:      #ffad56;
+    --ok:        #7fd68c;
+    --bad:       #ff6b5e;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+  body { color: var(--text); font: 12px/1 var(--sans); -webkit-font-smoothing: antialiased; }
+  html.demo body { background: #0e0e0f; padding: 40px 24px; height: auto; overflow: auto; }
+
+  /* the device fills the jweb; the demo shows it at 169 px */
+  .device {
+    position: relative; width: 100%; height: 100%;
+    padding: 8px 10px 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.025), transparent 40%), var(--bg);
+    display: grid; grid-template-rows: 24px 1fr 30px; row-gap: 6px;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none; cursor: default;
+  }
+  html.demo .device { height: 169px; max-width: 1100px; min-width: 800px; margin: 0 auto; border: 1px solid #000; border-radius: 3px; }
+
+  /* header ----------------------------------------------------------- */
+  header { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .brand { display: flex; align-items: baseline; gap: 8px; margin-right: auto; white-space: nowrap; }
+  .brand h1 { margin: 0; font: 650 14px var(--sans); letter-spacing: .01em; }
+  .brand h1 em { font-style: normal; color: var(--live); }
+  .brand span { font: 10px var(--mono); color: var(--faint); }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 20px; padding: 0 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    font: 10px var(--mono); color: var(--dim); white-space: nowrap;
+  }
+  .chip i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+  .chip b { color: var(--text); font-weight: 500; }
+  .chip.found i { background: var(--ok); box-shadow: 0 0 6px rgba(127,214,140,.6); }
+  .chip.missing i { background: var(--bad); box-shadow: 0 0 6px rgba(255,107,94,.5); }
+  .chip.missing b { color: var(--bad); }
+  .chip.scan i { background: var(--live); animation: blink .5s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+
+  /* generic buttons --------------------------------------------------- */
+  button {
+    font: inherit; color: inherit; cursor: pointer;
+    background: var(--panel-hi); border: 1px solid var(--line); border-radius: 4px;
+    transition: background .12s, border-color .12s, opacity .12s;
+  }
+  button:hover  { background: #3b3c41; border-color: #4a4b51; }
+  button:active { transform: translateY(1px); }
+  button:focus { outline: none; }
+  button:focus-visible, .dd-trigger:focus-visible { outline: 1px solid var(--live); outline-offset: 1px; }
+
+  .ghost { height: 20px; padding: 0 9px; font: 10px var(--mono); color: var(--dim); display: inline-flex; align-items: center; gap: 5px; }
+  .ghost svg { width: 11px; height: 11px; }
+  .ghost.spin svg { animation: rot .8s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  /* main row ---------------------------------------------------------- */
+  main { display: grid; grid-template-columns: 1.35fr 1fr 1.25fr; gap: 6px; min-height: 0; }
+  .panel {
+    position: relative;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+    padding: 7px 9px 8px;
+    display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0;
+  }
+  .panel > h2 {
+    margin: 0; display: flex; align-items: center; gap: 6px;
+    font: 500 9px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--dim);
+  }
+  .panel > h2 i { width: 7px; height: 7px; border-radius: 2px; background: var(--c, var(--faint)); }
+  .panel > h2 small { margin-left: auto; font: inherit; letter-spacing: .04em; text-transform: none; color: var(--faint); }
+  .panel.mel { --c: #ff9a3c; --rgb: 255,154,60; --ct: #ffdcbb; }
+  .panel.voc { --c: #62b8ff; --rgb: 98,184,255;  --ct: #c8e6ff; }
+
+  /* settings panel ---------------------------------------------------- */
+  .settings-body { display: flex; gap: 14px; flex: 1; min-height: 0; }
+  .col-place { flex: 0 0 132px; display: flex; flex-direction: column; gap: 5px; }
+  .field-label { font: 9px var(--mono); color: var(--faint); letter-spacing: .08em; }
+
+  .panel.settings { position: static; }     /* the open list is placed against the device, not the panel */
+  .dd { position: static; }
+  .dd-trigger {
+    width: 100%; height: 26px; padding: 0 8px 0 9px;
+    display: flex; align-items: center; gap: 7px; text-align: left;
+    background: #18191b; border: 1px solid var(--line); border-radius: 4px;
+    font: 12px var(--sans); color: var(--text);
+  }
+  .dd-trigger:hover { background: #18191b; border-color: #55565c; }
+  .dd.open .dd-trigger { border-color: var(--live); }
+  .dd-trigger .lbl { flex: 1; }
+  .dd-trigger .caret { width: 8px; height: 8px; color: var(--dim); transition: transform .15s; }
+  .dd.open .caret { transform: rotate(180deg); color: var(--live); }
+  .dd-list {
+    position: absolute; left: 20px; width: 134px; top: 58px;      /* covers the trigger: stays inside the 169 px */
+    background: #16171a; border: 1px solid var(--live); border-radius: 4px;
+    padding: 3px; z-index: 20; display: none;
+    box-shadow: 0 6px 18px rgba(0,0,0,.6);
+  }
+  .dd.open .dd-list { display: block; }
+  .dd-item {
+    height: 24px; padding: 0 7px; display: flex; align-items: center; gap: 7px;
+    border-radius: 3px; cursor: pointer; font: 12px var(--sans);
+  }
+  .dd-item:hover, .dd-item.kb { background: rgba(255,173,86,.14); }
+  .dd-item.sel { color: var(--live); }
+  .dd-item.sel::after { content: "\2713"; margin-left: auto; font-size: 10px; }
+
+  .glyph { width: 20px; height: 14px; flex: none; }
+  .glyph rect { fill: var(--faint); }
+  .glyph rect.on { fill: var(--live); }
+
+  .col-opts { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0; }
+  .sw {
+    display: flex; align-items: center; gap: 8px; height: 19px; padding: 0 2px;
+    background: none; border: 0; border-radius: 3px; text-align: left; font: 11px var(--sans); color: var(--dim);
+    white-space: nowrap;
+  }
+  .sw:hover { background: none; color: var(--text); }
+  .sw .track {
+    width: 26px; height: 14px; border-radius: 7px; position: relative; flex: none;
+    background: #18191b; border: 1px solid var(--line); transition: background .15s, border-color .15s;
+  }
+  .sw .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--faint); transition: transform .15s, background .15s;
+  }
+  .sw[aria-checked="true"] { color: var(--text); }
+  .sw[aria-checked="true"] .track { background: rgba(255,173,86,.18); border-color: var(--live); }
+  .sw[aria-checked="true"] .track::after { transform: translateX(12px); background: var(--live); box-shadow: 0 0 6px rgba(255,173,86,.7); }
+
+  /* action buttons ---------------------------------------------------- */
+  .act {
+    flex: 1; min-height: 0; width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+    font: 600 13px var(--sans); letter-spacing: .01em;
+    background: linear-gradient(180deg, rgba(var(--rgb),.26), rgba(var(--rgb),.10)), #1d1e20;
+    border: 1px solid rgba(var(--rgb),.55);
+    color: var(--ct);
+    border-radius: 5px;
+  }
+  .act:hover { background: linear-gradient(180deg, rgba(var(--rgb),.38), rgba(var(--rgb),.18)), #212224; border-color: var(--c); }
+  .act svg { width: 16px; height: 16px; flex: none; }
+  .act.sec { background: var(--panel-hi); border-color: var(--line); color: var(--text); font-weight: 500; }
+  .act.sec:hover { background: #3b3c41; border-color: rgba(var(--rgb),.6); }
+  /* busy: dimmed, never disabled (a repeated Send is refused by the device itself, Cancel must always work) */
+  .device.busy .act { opacity: .5; }
+
+  .voc-row { display: flex; align-items: stretch; flex: 1; min-height: 0; }
+  .voc-row .step { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .voc-row .step > .act { flex: 1; }
+  .step-tag { font: 9px var(--mono); color: var(--faint); letter-spacing: .1em; display: flex; gap: 5px; align-items: center; }
+  .step-tag .n { width: 12px; height: 12px; border-radius: 50%; display: block; text-align: center; line-height: 10px; border: 1px solid var(--faint); font-size: 8px; }
+  .step.done .step-tag { color: #62b8ff; }
+  .step.done .step-tag .n { background: #62b8ff; border-color: #62b8ff; color: #0c1a24; }
+  .link { width: 22px; display: flex; align-items: center; justify-content: center; color: var(--faint); margin-top: 14px; }
+  .link svg { width: 14px; height: 10px; }
+  .step.done + .link { color: #62b8ff; }
+
+  /* footer: status + cancel ------------------------------------------ */
+  footer {
+    position: relative; display: flex; align-items: center; gap: 8px; overflow: hidden;
+    margin: 0 -10px; padding: 0 10px; background: #17181a; border-top: 1px solid var(--line);
+  }
+  .led { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px rgba(127,214,140,.65); flex: none; }
+  .device.busy .led { background: var(--live); box-shadow: 0 0 8px rgba(255,173,86,.8); animation: blink .6s steps(2) infinite; }
+  #status {
+    flex: 1; min-width: 0; font: 10.5px/12px var(--mono); color: var(--dim);
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; word-break: break-word;
+  }
+  .device.busy #status { color: var(--text); }
+  #cancel { height: 22px; padding: 0 12px; font: 11px var(--sans); display: inline-flex; align-items: center; gap: 6px; color: var(--dim); }
+  #cancel svg { width: 9px; height: 9px; }
+  .device.cancelable #cancel { border-color: var(--bad); color: var(--bad); }
+  /* no progress figure exists: an indeterminate sweep while a job runs */
+  .sweep { position: absolute; left: 0; top: 0; height: 2px; width: 100%; opacity: 0; overflow: hidden; }
+  .sweep::before { content: ""; position: absolute; top: 0; height: 2px; width: 22%; background: var(--live); box-shadow: 0 0 6px var(--live); animation: sweep 1.3s ease-in-out infinite; }
+  .device.busy .sweep { opacity: 1; }
+  @keyframes sweep { 0% { left: -22%; } 100% { left: 100%; } }
+</style>
+</head>
+<body>
+
+<div class="device" id="device">
+
+  <header>
+    <div class="brand">
+      <h1>ARA2 Bridge <em>4 Live</em></h1>
+      <span>v0.2</span>
+    </div>
+    <span class="chip" id="chipMel"><i></i>Melodyne <b>checking</b></span>
+    <span class="chip" id="chipVoc"><i></i>VocAlign <b>checking</b></span>
+    <button class="ghost" id="refresh" type="button">
+      <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.2 6a4.2 4.2 0 1 1-1.3-3"/><path d="M9.4 1v2.4H7"/></svg>
+      Refresh plug-ins
+    </button>
+  </header>
+
+  <main>
+    <section class="panel settings">
+      <h2><i></i>Settings</h2>
+      <div class="settings-body">
+        <div class="col-place">
+          <span class="field-label">PLACEMENT</span>
+          <div class="dd" id="dd">
+            <button class="dd-trigger" id="ddTrigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <svg class="glyph" id="ddGlyph" viewBox="0 0 20 14"></svg>
+              <span class="lbl" id="ddLabel">Take lane</span>
+              <svg class="caret" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1 5.5 4 2.5l3 3"/></svg>
+            </button>
+            <div class="dd-list" id="ddList" role="listbox"></div>
+          </div>
+        </div>
+        <div class="col-opts">
+          <button class="sw" type="button" role="switch" aria-checked="false" data-key="skip"><span class="track"></span>Skip timing fix</button>
+          <button class="sw" type="button" role="switch" aria-checked="false" data-key="preview"><span class="track"></span>Preview</button>
+          <button class="sw" type="button" role="switch" aria-checked="false" data-key="sync"><span class="track"></span>Sync transport</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel mel">
+      <h2><i></i>Melodyne</h2>
+      <button class="act" id="sendMelodyne" type="button" data-action="sendMelodyne">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h10"/><path d="M8.5 4.5 12 8l-3.5 3.5"/><path d="M14 3v10"/></svg>
+        Send to Melodyne
+      </button>
+    </section>
+
+    <section class="panel voc">
+      <h2><i></i>VocAlign <small id="guideState">no guide</small></h2>
+      <div class="voc-row">
+        <div class="step" id="stepGuide">
+          <div class="step-tag"><span class="n">1</span>GUIDE</div>
+          <button class="act sec" id="setGuide" type="button" data-action="setGuide">Set guide</button>
+        </div>
+        <div class="link">
+          <svg viewBox="0 0 14 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 5h11M8.5 1.5 12 5 8.5 8.5"/></svg>
+        </div>
+        <div class="step">
+          <div class="step-tag"><span class="n">2</span>ALIGN</div>
+          <button class="act" id="sendVocAlign" type="button" data-action="sendVocAlign">Send to VocAlign</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="sweep"></div>
+    <span class="led"></span>
+    <span id="status">Starting...</span>
+    <button id="cancel" type="button" data-action="cancel">
+      <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg>
+      Cancel
+    </button>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (s) { return document.querySelector(s); };
+  var device = $("#device");
+  var hasMax = !!(window.max && typeof window.max.outlet === "function");
+
+  // ---------------------------------------------------------------- Max side (outbound)
+  function send() {
+    var args = Array.prototype.slice.call(arguments);
+    if (hasMax) { try { window.max.outlet.apply(window.max, args); } catch (e) { /* ignore */ } }
+    else demoSend(args);
+  }
+
+  // ---------------------------------------------------------------- placement dropdown
+  var OPTIONS = [
+    { label: "Take lane",
+      glyph: '<rect x="0" y="0" width="20" height="3" rx="1"/><rect class="on" x="0" y="5" width="20" height="3" rx="1"/>' },
+    { label: "New track",
+      glyph: '<rect x="0" y="0" width="20" height="5" rx="1"/><rect class="on" x="0" y="8" width="20" height="5" rx="1"/>' },
+    { label: "Replace",
+      glyph: '<rect class="on" x="0" y="3" width="20" height="8" rx="1"/>' }
+  ];
+  var sel = 0, kb = 0;
+  var dd = $("#dd"), list = $("#ddList"), trig = $("#ddTrigger");
+
+  function renderDD() {
+    var h = "";
+    for (var i = 0; i < OPTIONS.length; i++) {
+      h += '<div class="dd-item' + (i === kb ? " kb" : "") + (i === sel ? " sel" : "") + '" role="option" data-i="' + i +
+           '" aria-selected="' + (i === sel) + '"><svg class="glyph" viewBox="0 0 20 14">' + OPTIONS[i].glyph +
+           "</svg><span>" + OPTIONS[i].label + "</span></div>";
+    }
+    list.innerHTML = h;
+    $("#ddLabel").textContent = OPTIONS[sel].label;
+    $("#ddGlyph").innerHTML = OPTIONS[sel].glyph;
+  }
+  function setOpen(v) {
+    if (dd.classList.contains("open") === v) return;
+    dd.classList.toggle("open", v);
+    trig.setAttribute("aria-expanded", v ? "true" : "false");
+    kb = sel; renderDD();
+  }
+  function choose(i) {                       // the user picked an item: tell Max
+    sel = i; setOpen(false); renderDD();
+    send("ui_set", "placement", i);
+  }
+  trig.addEventListener("click", function (e) { e.stopPropagation(); setOpen(!dd.classList.contains("open")); });
+  list.addEventListener("click", function (e) {
+    var it = e.target.closest ? e.target.closest(".dd-item") : null;
+    if (it) { e.stopPropagation(); choose(+it.getAttribute("data-i")); }
+  });
+  document.addEventListener("click", function () { setOpen(false); });
+  trig.addEventListener("keydown", function (e) {
+    var open = dd.classList.contains("open");
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) { setOpen(true); return; }
+      kb = (kb + (e.key === "ArrowDown" ? 1 : OPTIONS.length - 1)) % OPTIONS.length; renderDD();
+    } else if ((e.key === "Enter" || e.key === " ") && open) { e.preventDefault(); choose(kb); }
+    else if (e.key === "Escape") setOpen(false);
+  });
+  renderDD();
+
+  // ---------------------------------------------------------------- switches
+  var SWITCHES = document.querySelectorAll(".sw");
+  function switchOn(key) { return document.querySelector('.sw[data-key="' + key + '"]').getAttribute("aria-checked") === "true"; }
+  Array.prototype.forEach.call(SWITCHES, function (b) {
+    b.addEventListener("click", function () {
+      var on = b.getAttribute("aria-checked") !== "true";
+      b.setAttribute("aria-checked", on ? "true" : "false");
+      send("ui_set", b.getAttribute("data-key"), on ? 1 : 0);
+    });
+  });
+
+  // ---------------------------------------------------------------- buttons
+  var scanTimer = null;
+  Array.prototype.forEach.call(document.querySelectorAll("[data-action]"), function (b) {
+    b.addEventListener("click", function () { send("ui_action", b.getAttribute("data-action")); });
+  });
+  $("#refresh").addEventListener("click", function () {
+    send("ui_action", "refreshPlugins");
+    startScan();
+  });
+
+  // ---------------------------------------------------------------- state from Max (inbound, never echoed)
+  var plug = { host: null, mel: null, voc: null, scanning: false };
+  function chip(el, name, v) {
+    var cls = "chip", txt;
+    if (plug.scanning) { cls += " scan"; txt = "scanning"; }
+    else if (plug.host === 0) { cls += " missing"; txt = "no host"; }
+    else if (v === null) { txt = "checking"; }
+    else if (v === 1) { cls += " found"; txt = "found"; }
+    else { cls += " missing"; txt = "not found"; }
+    el.className = cls;
+    el.innerHTML = "<i></i>" + name + " <b>" + txt + "</b>";
+  }
+  function renderChips() { chip($("#chipMel"), "Melodyne", plug.mel); chip($("#chipVoc"), "VocAlign", plug.voc); $("#refresh").classList.toggle("spin", plug.scanning); }
+  function stopScan() { if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; } plug.scanning = false; }
+  function startScan() {
+    stopScan(); plug.scanning = true; renderChips();
+    scanTimer = setTimeout(function () { plug.scanning = false; scanTimer = null; renderChips(); }, 8000);   // no answer: show what we knew
+  }
+
+  function setSwitch(key, v) {
+    var b = document.querySelector('.sw[data-key="' + key + '"]');
+    if (b) b.setAttribute("aria-checked", v ? "true" : "false");
+  }
+  function applySetting(name, v) {
+    v = +v;
+    if (name === "placement") { if (v >= 0 && v < OPTIONS.length) { sel = v; kb = v; renderDD(); } }
+    else setSwitch(name, v === 1);
+  }
+  function applyState(kind, a, b) {
+    if (kind === "busy") device.classList.toggle("busy", +a === 1);
+    else if (kind === "cancel") device.classList.toggle("cancelable", +a === 1);
+    else if (kind === "host") { stopScan(); plug.host = +a; renderChips(); }
+    else if (kind === "plugins") { stopScan(); plug.host = 1; plug.mel = +a === 1 ? 1 : 0; plug.voc = +b === 1 ? 1 : 0; renderChips(); }
+    else if (kind === "guide") {
+      $("#stepGuide").classList.toggle("done", +a === 1);
+      $("#guideState").textContent = +a === 1 ? "guide set ✓" : "no guide";
+    }
+    else if (kind === "setting") applySetting(a, b);
+  }
+  function flat(args) {
+    args = Array.prototype.slice.call(args);
+    return (args.length === 1 && Object.prototype.toString.call(args[0]) === "[object Array]") ? args[0] : args;
+  }
+  function onState() { var a = flat(arguments); applyState(a[0], a[1], a[2]); }
+  function onStatus() { $("#status").textContent = flat(arguments).join(" "); }
+
+  // ---------------------------------------------------------------- demo mode (no Max): the page answers itself
+  var demoTimer = null;
+  function demoSend(args) {
+    if (args[0] === "ui_set") { applySetting(args[1], args[2]); }
+    else if (args[0] === "ui_action") {
+      var act = args[1];
+      if (act === "refreshPlugins") { setTimeout(function () { onState("plugins", 1, 1); onStatus("Ready. Melodyne: found. VocAlign: found."); }, 900); }
+      else if (act === "cancel") { clearTimeout(demoTimer); onState("busy", 0); onState("cancel", 0); onStatus("Cancelling..."); }
+      else if (act === "setGuide") { onState("guide", 1); onStatus("Guide set: Lead vocal (Vox). Now select the dub clip and press Send to VocAlign."); }
+      else {
+        onState("busy", 1); onState("cancel", 1); onStatus("Starting " + (act === "sendMelodyne" ? "Melodyne" : "VocAlign") + "...");
+        demoTimer = setTimeout(function () { onState("busy", 0); onState("cancel", 0); onStatus("Done. (demo)"); }, 2500);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- start
+  document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  document.addEventListener("dragstart", function (e) { e.preventDefault(); });
+  if (hasMax) {
+    // handlers first, then ask for everything that was said before this page existed
+    if (typeof window.max.bindInlet === "function") {
+      window.max.bindInlet("ui_state", onState);
+      window.max.bindInlet("ui_status", onStatus);
+    }
+    send("ui_loaded");
+  } else {
+    document.documentElement.className = "demo";
+    onState("setting", "placement", 0); onState("setting", "preview", 1); onState("setting", "sync", 1);
+    onState("plugins", 1, 1); onStatus("Ready. Melodyne: found. VocAlign: found.");
+  }
+})();
+</script>
+</body>
+</html>
