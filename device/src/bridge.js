@@ -134,6 +134,8 @@ var ARABridge = (function (maxThis) {
         plugins: { melodyne: null, vocalign: null },   // true/false from --find-plugins, null = unknown
         placement: 'takeLane',
         realign: true,
+        preview: false,           // "Live preview" toggle (Melodyne): the next job asks the host for previews
+        pv: null,                 // the preview track and clip in the Live set {trackId, clipId, n}, made by this device
         guide: null,              // {region, clipId, trackId, name}
         job: null,                // the one job of this device (busy while non-null)
         run: null,                // the placement sequence
@@ -498,7 +500,7 @@ var ARABridge = (function (maxThis) {
         S.job = ctx;
         ctx.id = job.id;
         S.lastSendAt = now();
-        dlog('launch ' + job.id + ' plugin=' + job.plugin + ' placement=' + job.placement + ' realign=' + job.realign +
+        dlog('launch ' + job.id + ' plugin=' + job.plugin + ' placement=' + job.placement + ' realign=' + job.realign + (job.preview ? ' preview=1' : '') +
             (job.output ? ' output=' + job.output : '') +
             ' clip=' + job.clips[job.clips.length - 1].name);
         ctx.phase = 'launching';
@@ -543,12 +545,14 @@ var ARABridge = (function (maxThis) {
         var place = 'placement: ' + (PLACEMENT_WORDS[j.placement] || String(j.placement));
         if (j.plugin === 'melodyne') {
             return 'Melodyne is open (timing correction: ' + (j.realign ? 'on' : 'off') + ', ' + place +
-                '). Edit, then press Apply in its window. ' + NO_SOUND;
+                (j.preview ? ', live preview: on' : '') + '). Edit, then press Apply in its window. ' +
+                (j.preview ? 'A Preview track appears below this track after each edit; mute this track to compare. ' : '') + NO_SOUND;
         }
         return 'VocAlign is open (' + place + '). Capture guide and dub, align, then press Apply. ' + NO_SOUND;
     }
 
     function finishJob(line) {
+        if ((S.pv || (S.run && S.run.preview)) && S.job && !S.dead) { startPreviewCleanup(line); return; }
         dlog('finish ' + (S.job ? S.job.id + ' (' + S.job.phase + ')' : '-') + ': ' + (line || ''));
         S.lastFinishAt = now();
         S.retryFor = null;
@@ -568,11 +572,11 @@ var ARABridge = (function (maxThis) {
         var c = check('melodyne', 'source');
         if (!c.ok) { say(c.reason); return; }
         var r = c.region;
-        var b = C.buildJob({ id: newJobId(), plugin: 'melodyne', placement: S.placement, realign: S.realign,
+        var b = C.buildJob({ id: newJobId(), plugin: 'melodyne', placement: S.placement, realign: S.realign, preview: S.preview,
             clips: [jobClip('source', r)], tempo: r.tempo, trackIndex: c.sel.trackIndex });
         if (!b.ok) { say('Could not build the job: ' + b.reason); return; }
         launch(b.job, { plugin: 'melodyne', label: 'Melodyne', region: r, clipId: c.sel.clipId, trackId: c.sel.trackId,
-            tempo: r.tempo, placement: b.job.placement });
+            tempo: r.tempo, placement: b.job.placement, preview: b.job.preview === true });
     }
 
     // What a clip is now: null when it is gone; onMainLane false when it is not on its track's main lane.
@@ -777,6 +781,7 @@ var ARABridge = (function (maxThis) {
         runnerAlive();
         var j = S.job;
         if (!j || j.phase === 'placing' || j.phase === 'copying') return;
+        if (d.state === 'preview') { onPreview(d); return; }
         if (d.state === 'cancelling') say('Cancelling...');
         else if (d.state === 'backstop') say('The host took too long and is being stopped.');
         // state idle with a job of ours: a done may still follow (the host exited, the grace wait runs); the cancel
@@ -821,6 +826,7 @@ var ARABridge = (function (maxThis) {
         var j = S.job;
         if (!j || d.jobId !== j.id) { log('done for another job ' + d.jobId + ' (ignored)'); return; }
         if (j.phase === 'placing' || j.phase === 'copying') { log('second done ignored'); return; }
+        if (S.run && S.run.preview) { j.doneWaiting = d; log('done while a preview is being placed: waiting for it'); return; }
         stop(launchWatch);
         stop(cancelWatch);
         setCancelable(false);
@@ -968,13 +974,169 @@ var ARABridge = (function (maxThis) {
             tempo: tempo, trackIndex: trackIndex, sourceClipId: j.clipId, resultFile: j.resultFile, pluginLabel: j.label,
             existingClips: existing, placeAtBeats: placeAtBeats });
         if (!plan.ok) { keptLine(j); finishJob('Not placed: ' + plan.reason + '.'); return; }
+        var pv = S.pv;
+        if (pv) {   // the preview track goes first; a failure to remove it is only a note
+            plan.ops = previewRemovalOps().concat(plan.ops);
+        }
         S.run = {
             job: j, mode: j.placement, tempo: tempo, trackId: j.trackId, sourceClipId: j.clipId,
             ops: plan.ops, rollbackAfter: plan.rollbackAfter, onRestoreFailure: plan.onRestoreFailure,
             list: plan.ops, i: 0, phase: 'main', produced: {}, order: [], pending: null, ticks: 0,
             destructive: 'not-run', failure: null, warnings: [], leftovers: [], laneLeft: false
         };
+        if (pv) { seedPreview(S.run, pv); S.pv = null; }
         later(seqTask, 0);
+    }
+
+    // ------------------------------------------------------------------------------------------ live preview
+    // The host renders again after every edit and publishes preview-<n>/ in the job folder; the runner reports each as a
+    // `status` message with state "preview". Each one goes onto a Preview track made by this device, right below the
+    // source track: the first creates the track, later ones replace the clip on it. Live itself plays that clip, so it
+    // is in sync with every other track. Nothing is ever created on, or removed from, the user's own tracks. The
+    // track and clip are removed when the job ends (Apply: before the result is placed; Cancel and failures: by the
+    // cleanup sequence in finishJob), and a failed preview rolls back like a placement. The sequences use the same
+    // executor as the placement (run.preview / run.cleanup mark them).
+    function previewRemovalOps() {
+        return [
+            { op: 'delete_clip', target: 'previewTrack', label: 'Removing the preview', args: [{ ref: 'previewClip' }],
+                optional: true, optionalNote: 'the preview clip could not be removed; delete the Preview track by hand' },
+            { op: 'delete_track', target: 'song', label: 'Removing the preview track', args: [{ ref: 'previewTrack' }],
+                optional: true, optionalNote: 'the Preview track could not be removed; delete it by hand' }
+        ];
+    }
+
+    function seedPreview(run, pv) {
+        produce(run, 'previewTrack', 'track', pv.trackId, null, 0);
+        if (pv.clipId) produce(run, 'previewClip', 'clip', pv.clipId, 'previewTrack', pv.trackId);
+    }
+
+    function newRun(j, extra) {
+        var run = {
+            job: j, mode: 'preview', tempo: j.tempo, trackId: j.trackId, sourceClipId: j.clipId,
+            rollbackAfter: [], onRestoreFailure: null, i: 0, phase: 'main', produced: {}, order: [], pending: null, ticks: 0,
+            destructive: 'not-run', failure: null, warnings: [], leftovers: [], laneLeft: false
+        };
+        for (var k in extra) if (extra.hasOwnProperty(k)) run[k] = extra[k];
+        run.list = run.ops;
+        return run;
+    }
+
+    function onPreview(d) {
+        var j = S.job;
+        if (!j || !j.preview || d.jobId !== j.id || j.phase !== 'running') return;
+        var rj = d.resultJson;
+        if (!isObj(rj) || rj.status !== 'ok' || !isStr(rj.resultPath) || !(rj.frames > 0) || !(rj.sampleRate > 0)) {
+            log('preview ' + d.n + ' is not usable (ignored)');
+            return;
+        }
+        var st = fileStat(rj.resultPath);
+        if (!st.exists || (st.size !== null && st.size < 44 + rj.frames * 4)) { log('preview ' + d.n + ': the file is missing or incomplete (ignored)'); return; }
+        j.pendingPreview = { n: d.n, res: rj };
+        if (!S.run) startPreview(j);   // else: when the running sequence ends (only the newest preview is kept)
+    }
+
+    function previewSkipped(j, why) {
+        j.pendingPreview = null;
+        say('No preview: ' + why + '.');
+    }
+
+    function startPreview(j) {
+        var p = j.pendingPreview;
+        j.pendingPreview = null;
+        if (!p || S.run || j.phase !== 'running') return;
+        var song = newApi('live_set');
+        var tracks = getIds(song, 'tracks');
+        var trackIndex = indexOfVal(tracks, j.trackId);
+        if (trackIndex < 0) { previewSkipped(j, 'the source track was deleted'); return; }
+        var tempo = getNum(song, 'tempo');
+        if (tempo === null || Math.abs(tempo - j.tempo) > 1e-6) { previewSkipped(j, 'the song tempo changed'); return; }
+        var pv = S.pv;
+        if (pv && indexOfVal(tracks, pv.trackId) < 0) { log('the preview track is gone'); S.pv = pv = null; }
+        var plan = C.planPlacement({ mode: 'preview', region: j.region, result: { frames: p.res.frames, sampleRate: p.res.sampleRate },
+            tempo: tempo, trackIndex: trackIndex, resultFile: p.res.resultPath, pluginLabel: 'preview', hasPreviewTrack: !!pv });
+        if (!plan.ok) { previewSkipped(j, plan.reason); return; }
+        dlog('preview ' + p.n + ' ' + (pv ? 'replaces the clip' : 'creates the track') + ' frames=' + p.res.frames);
+        S.run = newRun(j, { preview: true, previewN: p.n, ops: plan.ops });
+        if (pv) seedPreview(S.run, pv);
+        say('Updating the preview...');
+        later(seqTask, 0);
+    }
+
+    function afterPreviewRun(j) {
+        if (S.job !== j) return;
+        if (j.doneWaiting) { var d = j.doneWaiting; j.doneWaiting = null; onDone(d); return; }
+        if (j.pendingPreview) startPreview(j);
+    }
+
+    function endPreviewRun(run) {
+        S.run = null;
+        var j = run.job;
+        var warn = run.warnings.length ? ' Note: ' + run.warnings.join('; ') + '.' : '';
+        if (run.phase === 'main') {
+            var tr = run.produced.previewTrack, cl = run.produced.newClip;
+            if (tr && !tr.deleted && cl && !cl.deleted) {
+                S.pv = { trackId: tr.id, clipId: cl.id, n: run.previewN };
+                say('Preview ' + run.previewN + ' is on the Preview track. Mute the original track to compare.' + warn);
+            } else {
+                S.pv = null;
+                say('The preview could not be placed.' + warn);
+            }
+        } else {
+            S.pv = null;   // the rollback removed what this sequence and the previous preview had made
+            var left = run.leftovers.length ? ' Check the track: ' + run.leftovers.join('; ') + '.' : '';
+            say('No preview: ' + run.failure + '.' + left + warn);
+        }
+        afterPreviewRun(j);
+    }
+
+    // The job is ending (finishJob) while a preview exists: remove it first, then finish with the same line.
+    function startPreviewCleanup(line) {
+        var j = S.job;
+        var ops = [];
+        var cleanup = null;
+        var pv = S.pv;
+        var inflight = S.run;
+        S.pv = null;
+        j.phase = 'placing';            // no cancel, no second done, no watch fires while the cleanup runs
+        stop(launchWatch);
+        stop(cancelWatch);
+        stop(copyWatch);
+        cleanup = newRun(j, { mode: 'cleanup', cleanup: true, line: line, ops: ops });
+        if (pv) seedPreview(cleanup, pv);
+        if (inflight && inflight.preview) {   // a preview sequence was cut short: what it made goes too
+            for (var i = 0; i < inflight.order.length; i++) {
+                var nm = inflight.order[i];
+                var o = inflight.produced[nm];
+                if (!o || o.deleted || (pv && (nm === 'previewTrack' || nm === 'previewClip'))) continue;
+                if (o.kind === 'track') { produce(cleanup, 'x' + nm, 'track', o.id, null, 0); }
+                else if (o.kind === 'clip') { produce(cleanup, 'x' + nm, 'clip', o.id, o.containerName ? 'x' + o.containerName : null, o.containerId); }
+            }
+        }
+        var names = [];
+        for (var k in cleanup.produced) if (cleanup.produced.hasOwnProperty(k)) names.push(k);
+        for (var a = 0; a < names.length; a++) {
+            if (cleanup.produced[names[a]].kind === 'clip') {
+                ops.push({ op: 'delete_clip', target: cleanup.produced[names[a]].containerName || 'previewTrack', label: 'Removing the preview',
+                    args: [{ ref: names[a] }], optional: true, optionalNote: 'a preview clip could not be removed; delete the Preview track by hand' });
+            }
+        }
+        for (var b = 0; b < names.length; b++) {
+            if (cleanup.produced[names[b]].kind === 'track') {
+                ops.push({ op: 'delete_track', target: 'song', label: 'Removing the preview track', args: [{ ref: names[b] }],
+                    optional: true, optionalNote: 'the Preview track could not be removed; delete it by hand' });
+            }
+        }
+        cleanup.list = ops;
+        dlog('preview cleanup (' + ops.length + ' ops) before: ' + line);
+        S.run = cleanup;
+        say('Removing the preview...');
+        later(seqTask, 0);
+    }
+
+    function endCleanup(run) {
+        S.run = null;
+        var note = run.warnings.length ? ' Note: ' + run.warnings.join('; ') + '.' : '';
+        finishJob(run.line + note);
     }
 
     var seqTask = newTask(function () { tick(); });
@@ -1024,6 +1186,8 @@ var ARABridge = (function (maxThis) {
     // Give up without touching anything more (internal problems only).
     function abortRun(run, why) {
         S.run = null;
+        if (run.cleanup) { finishJob(run.line + ' (removing the preview stopped: ' + why + '; delete the Preview track by hand)'); return; }
+        if (run.preview) { S.pv = null; say('The preview stopped: ' + why + '. Check the Preview track.'); afterPreviewRun(run.job); return; }
         keptLine(run.job);
         var orf = run.onRestoreFailure;
         if (run.destructive !== 'not-run' && orf) finishJob(orf.message + ' (' + why + ')');
@@ -1045,7 +1209,7 @@ var ARABridge = (function (maxThis) {
         log(run.phase + ': ' + why);
         if (run.phase === 'main' && op.optional) {
             // cleanup after the verified result: a rollback would undo a good result
-            run.warnings.push(op.op === 'delete_track' ? 'the temporary scratch track could not be removed; delete it by hand' : why);
+            run.warnings.push(op.optionalNote || (op.op === 'delete_track' ? 'the temporary scratch track could not be removed; delete it by hand' : why));
             run.i++;
             later(seqTask, 0);
             return;
@@ -1107,6 +1271,8 @@ var ARABridge = (function (maxThis) {
     }
 
     function endPhase(run) {
+        if (run.cleanup) { endCleanup(run); return; }
+        if (run.preview) { endPreviewRun(run); return; }
         S.run = null;
         var j = run.job;
         var notes = run.warnings.slice(0);
@@ -1432,11 +1598,18 @@ var ARABridge = (function (maxThis) {
         S.realign = n === 1;
         log('realign (timing correction) is now ' + (S.realign ? 'on' : 'off'));
     }
+    function setPreview(v) {
+        var n = num(v);
+        if (n !== 0 && n !== 1) { say('preview must be 0 or 1.'); return; }
+        S.preview = n === 1;
+        log('live preview is now ' + (S.preview ? 'on' : 'off'));
+    }
     function settings(args) {
-        if (args.length % 2 !== 0) { say('settings needs key/value pairs (placement ..., realign ...).'); return; }
+        if (args.length % 2 !== 0) { say('settings needs key/value pairs (placement ..., realign ..., preview ...).'); return; }
         for (var i = 0; i < args.length; i += 2) {
             if (args[i] === 'placement') setPlacement(args[i + 1]);
             else if (args[i] === 'realign') setRealign(args[i + 1]);
+            else if (args[i] === 'preview') setPreview(args[i + 1]);
             else say('Unknown setting "' + String(args[i]) + '".');
         }
     }
@@ -1509,6 +1682,7 @@ var ARABridge = (function (maxThis) {
         } else if (j) {
             log('the device was deleted during a job (' + j.phase + '); its result stays in the job folder');
         }
+        if (S.pv) log('the device was deleted while a Preview track exists: delete it by hand');
         S.job = null;
         S.run = null;
     }

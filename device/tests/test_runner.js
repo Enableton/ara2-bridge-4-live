@@ -268,6 +268,67 @@ test('window mode: result.json before exit, host lingers, one done, busy until e
   delete process.env.ARABRIDGE_TEST_FOO;
 });
 
+test('live preview: new preview-<n> folders are reported once as status "preview", newest first, partial ones wait', async () => {
+  const host = fakeHost('h-preview.js',
+    'const mk = (n, body) => { const d = path.join(dir, "preview-" + n); fs.mkdirSync(d); fs.writeFileSync(path.join(d, "result.wav"), "x");' +
+    ' fs.writeFileSync(path.join(d, "result.json"), body); };\n' +
+    'const good = (n) => JSON.stringify({ version: 1, id: "x", status: "ok", message: "", frames: 10, sampleRate: 44100, resultPath: path.join(dir, "preview-" + n, "result.wav"), diagnostics: "secret" });\n' +
+    'setTimeout(() => mk(1, good(1)), 100);\n' +
+    // 3 is partial first, 2 is complete: 2 is reported; later 3 becomes complete and is reported too
+    'setTimeout(() => { mk(2, good(2)); mk(3, "{\\"vers"); }, 500);\n' +
+    'setTimeout(() => { fs.writeFileSync(path.join(dir, "preview-3", "result.json"), good(3)); }, 900);\n' +
+    // 4 and 5 appear between two polls: only 5 (the newest complete one) is reported
+    'setTimeout(() => { mk(4, good(4)); mk(5, good(5)); }, 1300);\n' +
+    'setTimeout(() => { writeResult(' + OK_RESULT + '); }, 1900);\nsetTimeout(() => process.exit(0), 2400);');
+  const fx = makeFixture();
+  const job = jobFor('melodyne');
+  job.preview = true;
+  fx.launch(job, 'window', host);
+  const st = await fx.started();
+  const previews = () => fx.all('status').filter((o) => o.data && o.data.state === 'preview');
+  await waitFor(() => previews().length >= 1, 5000, 'preview 1');
+  const first = previews()[0].data;
+  assert.strictEqual(first.n, 1);
+  assert.strictEqual(first.jobId, job.id);
+  assert.strictEqual(first.previewDir, path.join(st.jobDir, 'preview-1'));
+  assert.strictEqual(first.resultJson.status, 'ok');
+  assert.strictEqual(first.resultJson.diagnostics, undefined, 'slimmed like the final result');
+  assert.strictEqual(first.resultJson.resultPath, path.join(st.jobDir, 'preview-1', 'result.wav'));
+  await waitFor(() => previews().length >= 3, 5000, 'preview 3');
+  assert.strictEqual(previews()[1].data.n, 2, '3 was partial: the newest complete one');
+  assert.strictEqual(previews()[2].data.n, 3, '3 once complete');
+  const d = (await fx.waitSel('done')).data;
+  assert.strictEqual(d.resultJson.status, 'ok');
+  await sleep(300);
+  assert.deepStrictEqual(previews().map((o) => o.data.n), [1, 2, 3, 5], 'each reported once; 4 skipped in favour of 5');
+  assert.strictEqual(fx.all('done').length, 1);
+});
+
+test('live preview: nothing is reported without job.preview, and none after the result', async () => {
+  const host = fakeHost('h-preview-off.js',
+    'const d1 = path.join(dir, "preview-1"); fs.mkdirSync(d1);' +
+    ' fs.writeFileSync(path.join(d1, "result.json"), JSON.stringify({ version: 1, id: "x", status: "ok", message: "", frames: 10, sampleRate: 44100 }));\n' +
+    'setTimeout(() => { writeResult(' + OK_RESULT + '); }, 300);\n' +
+    'setTimeout(() => { const d2 = path.join(dir, "preview-2"); fs.mkdirSync(d2); fs.writeFileSync(path.join(d2, "result.json"), JSON.stringify({ status: "ok" })); }, 700);\n' +
+    'setTimeout(() => process.exit(0), 1200);');
+  const fx = makeFixture();
+  fx.launch(jobFor('melodyne'), 'window', host);            // no preview flag
+  await fx.started();
+  await fx.waitSel('done');
+  await sleep(900);
+  assert.strictEqual(fx.all('status').filter((o) => o.data && o.data.state === 'preview').length, 0);
+
+  const fx2 = makeFixture();
+  const job2 = jobFor('melodyne');
+  job2.preview = true;
+  fx2.launch(job2, 'window', host);
+  await fx2.started();
+  await fx2.waitSel('done');
+  await sleep(900);
+  const n = fx2.all('status').filter((o) => o.data && o.data.state === 'preview').map((o) => o.data.n);
+  assert.deepStrictEqual(n, [1], 'preview-1 before the result; preview-2 after it is never reported');
+});
+
 test('headless mode adds --autorender; vocalign job passes through unchanged', async () => {
   const host = fakeHost('h-headless.js', 'writeResult(' + OK_RESULT + '); process.exit(0);');
   const fx = makeFixture();

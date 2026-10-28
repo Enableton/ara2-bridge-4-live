@@ -23,6 +23,7 @@ new track, or in place of the original clip.
 | | |
 |---|---|
 | **Melodyne** | Send a clip, edit in Melodyne's window, **Apply to Live**. The edited audio comes back, with Melodyne's slight post-edit timing shift corrected automatically. |
+| **Live preview** (Melodyne, optional toggle) | While Melodyne is open, every edit shows up about half a second later as a clip on a **Preview** track under the source track. Live plays it, so you hear the edit in sync with the rest of the project. Mute the source track to compare; Apply or Cancel removes the Preview track. |
 | **VocAlign** | Pick a **guide** clip and a **dub** clip, align in VocAlign's window, **Apply to Live**. The result starts exactly at the guide's start, which is what you want for backing vocals against a lead. |
 | **Placement** | Take lane (original untouched), new track, or replace in place (original kept on a muted backup track). All undoable with Cmd+Z. |
 
@@ -99,6 +100,8 @@ says `Ready.` plus the plug-ins it found. Full instructions, the status messages
   audio interface in the window's Output menu if you hear nothing).
 - **VocAlign:** put the device on the guide track *and* on the dub track (Live shows only the selected track's devices).
   Select the guide clip and press **Set guide (VocAlign)**; select the dub clip and press **Send to VocAlign**; align; **Apply**.
+- **Live preview** (Melodyne): switch it on before **Send to Melodyne**. After each edit a Preview track appears (or updates) below the
+  source track; press play in Live and mute the source track to hear it with the other tracks.
 - **Skip timing correction** (Melodyne): leave it off normally. Switch it on if you ever hear clicks that are not in the
   host window.
 

@@ -25,6 +25,10 @@ namespace bridge
         std::string plugin;                     // "melodyne" | "vocalign"
         std::string placement { "takeLane" };   // "takeLane" | "newTrack" | "replace" (used by the device only)
         bool realign { true };
+        // window mode, melodyne only: while the editor is open, render the clip again after every edit and publish
+        // each state as preview-<n>/result.wav + result.json (hostcore/ApplyJob.h, writePreview); the device plays
+        // it as a clip in Live. Absent = false.
+        bool preview { false };
         // where result.wav starts: "dub" (default) = at the rendered clip's region (the dub for vocalign, the
         // source for melodyne); "guide" (vocalign only) = at the guide clip's arrangement position, the aligned dub
         // placed inside a window of digital silence (hostcore/JobLayout.h, GuideWindow)

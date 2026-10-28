@@ -149,9 +149,18 @@ TEST (job_tolerates_unknown_keys_and_null_optionals)
                                      R"(, "name": null, "extra": "x", "startBeats": null)"), job, error));
     CHECK (job.placement == "takeLane");
     CHECK (job.realign);
+    CHECK (! job.preview);
     CHECK_NEAR (job.tempo, 120.0, 1e-9);
     REQUIRE (job.clips.size () == 1);
     CHECK (job.clips[0].name == "source");
+
+    // "preview" is optional: absent or null is false
+    CHECK (loads ("jp1", melodyneJob (R"("preview": true, )", ""), job, error));
+    CHECK (job.preview);
+    CHECK (loads ("jp2", melodyneJob (R"("preview": false, )", ""), job, error));
+    CHECK (! job.preview);
+    CHECK (loads ("jp3", melodyneJob (R"("preview": null, )", ""), job, error));
+    CHECK (! job.preview);
 
     // The song object without a tempo keeps the default.
     CHECK (loads ("jn2", melodyneJob (R"("song": {}, )", ""), job, error));
@@ -242,6 +251,7 @@ TEST (job_rejects_wrong_types)
     CHECK (rejects ("t5", melodyneJob (R"("placement": 3, )", ""), "'placement' must be a string"));
     CHECK (rejects ("t6", melodyneJob (R"("realign": 1, )", ""), "'realign' must be true or false"));
     CHECK (rejects ("t7", melodyneJob (R"("realign": "yes", )", ""), "'realign' must be true or false"));
+    CHECK (rejects ("t7b", melodyneJob (R"("preview": 1, )", ""), "'preview' must be true or false"));
     CHECK (rejects ("t8", melodyneJob (R"("song": [120], )", ""), "'song' must be an object"));
     CHECK (rejects ("t9", melodyneJob (R"("song": {"tempo": "fast"}, )", ""), "'song.tempo' must be a number"));
     CHECK (rejects ("t10", R"({"version": 1, "id": "x", "plugin": "melodyne", "clips": {"role": "source"}})", "'clips' must be an array"));

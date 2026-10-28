@@ -5,6 +5,7 @@
 #include "realign/Realign.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -12,6 +13,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 namespace bridge
 {
@@ -197,5 +200,52 @@ namespace bridge
         if (! writeResult (job.dir, job.id, info, error, true))     // exclusive: never over a result written meanwhile
             return failed (job, error, writeResultOnError);
         return info;
+    }
+
+    ResultInfo writePreview (const Job& job, int index, const Audio& original, int64_t sourceStartFrame, const RenderFunction& render,
+                             const LogFunction& log, const GuideWindow& guideWindow)
+    {
+        Job preview { job };
+        preview.dir = job.dir + "/preview-" + std::to_string (index);
+        preview.keepRaw = false;
+        std::error_code ec;
+        std::filesystem::create_directory (preview.dir, ec);
+        if (ec || ! std::filesystem::is_directory (preview.dir))
+        {
+            ResultInfo info;
+            info.id = job.id;
+            info.status = "error";
+            info.message = "cannot create " + preview.dir;
+            return info;
+        }
+        ResultInfo info { applyJob (preview, original, sourceStartFrame, render, false, log, guideWindow) };
+        if (info.status != "ok")
+            std::filesystem::remove_all (preview.dir, ec);
+        return info;
+    }
+
+    int prunePreviews (const std::string& jobDir, int keepNewest)
+    {
+        std::vector<std::pair<long long, std::filesystem::path>> found;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator (jobDir, ec))
+        {
+            const std::string name { entry.path ().filename ().string () };
+            if (name.size () <= 8 || name.compare (0, 8, "preview-") != 0 || ! entry.is_directory (ec))
+                continue;
+            const std::string digits { name.substr (8) };
+            if (digits.empty () || digits.size () > 9 || ! std::all_of (digits.begin (), digits.end (), [] (char c) { return c >= '0' && c <= '9'; }))
+                continue;
+            found.emplace_back (std::stoll (digits), entry.path ());
+        }
+        std::sort (found.begin (), found.end ());
+        int removed { 0 };
+        for (size_t i { 0 }; i + static_cast<size_t> (std::max (keepNewest, 0)) < found.size (); ++i)
+        {
+            std::filesystem::remove_all (found[i].second, ec);
+            if (! ec)
+                ++removed;
+        }
+        return removed;
     }
 }

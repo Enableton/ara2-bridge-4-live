@@ -108,6 +108,8 @@ Max 16 MB, max 16 clips, unknown keys ignored, `null` counts as absent.
   `droppedFrames`, noted in `diagnostics`). Errors (exit 4, before the plug-in loads): a dub that ends at or before
   `T_g` (nothing of it would be kept) and a window longer than 7200 s. Guide and dub must have the same sample rate
   (already required). A dub after the guide's end is allowed (silence, then the dub).
+- `preview` (optional boolean, default false; window mode, Melodyne only, otherwise ignored): see "Live preview" below.
+  A non-boolean is a bad job.
 - Melodyne: exactly one clip, role `source`.
 - VocAlign: exactly one `guide` and one `dub`; `song.tempo` (0 < t <= 1e4) and every clip's `startBeats` are required;
   guide and dub must have the same sample rate.
@@ -116,6 +118,30 @@ Max 16 MB, max 16 clips, unknown keys ignored, `null` counts as absent.
 - Ignored by the host: `createdAt`, `sampleRate`, `channels`, `live.*`.
 - Compressed sources (MP3/AAC): MP3 files without a Xing/LAME tag and raw ADTS AAC keep ~576 / ~2112 leading samples of
   encoder padding in CoreAudio's output. Check how Live's `start_marker` relates to them, or restrict v1 to PCM sources.
+
+## Live preview (window mode, Melodyne, `preview: true`)
+
+While the editor is open the host renders the clip again after every edit and publishes each new state as
+`<job>/preview-<n>/` (n = 1, 2, ...): `result.wav` (written first, temp file + rename) and then `result.json` (same format
+and `realign` handling as the job's result, `resultPath` pointing into that folder). The job's own `result.wav` /
+`result.json` are never touched and the job does not end: **only the real `result.json` of the job means done**.
+
+- When it renders: the plug-in's ARA "content changed" notifications (audio modification / playback region) are counted
+  (SDK patch, `gBridgeContentChanges`); 0.4 s after the last one the host renders (the same pipeline as Apply: two renders for
+  Melodyne with the doubled-sample repair, then realign). The first render, 2 s after the window opened, only
+  fixes what "unedited" sounds like (hash of the render): a preview is published only when the render differs from the
+  last published one (the unedited state at first), so notifications that do not change the audio publish nothing.
+  Measured with a real Melodyne: 0.06-0.1 s for a 7 s clip (also while the window plays), editor and playback unaffected.
+- The host keeps the newest 3 `preview-<n>` folders and removes older ones. Cancel, Quit or a stop signal during a preview render
+  stop it and close the job as usual; Apply during a preview render waits for it.
+- The runner (`preview: true` jobs, window mode only) scans the job folder with its normal poll and reports each new complete
+  `preview-<n>/result.json` once (newest first; an older one that was skipped is dropped, one that does not parse yet is looked at
+  again) as `status {state: "preview", n, previewDir, resultJson (slimmed like `done`), jobId, ...}`. No new selector: the patch routes
+  `status` to js already. Nothing is reported after the job's result.
+- The device places each preview as an ordinary clip on a track it makes (`Preview: <clip name>`, right below the source
+  track, clip `<name> (preview)`), so Live itself plays it in sync with every other track. The next preview removes the
+  previous clip first. The track is removed when the job ends (before the result is placed for Apply; by a cleanup sequence for
+  Cancel and failures). The source track is never changed; the user mutes it to compare.
 
 ## result.json (host writes; authoritative)
 

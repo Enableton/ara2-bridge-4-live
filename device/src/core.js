@@ -406,6 +406,15 @@ var core = (function () {
             return badJob('realign must be true or false');
         }
 
+        // Live preview (Melodyne only): the host renders again after every edit and the device plays it as a clip
+        var preview = false;
+        if (spec.preview !== undefined && spec.preview !== null) {
+            if (spec.preview === true || spec.preview === 1) preview = true;
+            else if (spec.preview === false || spec.preview === 0) preview = false;
+            else return badJob('preview must be true or false');
+        }
+        if (plugin !== 'melodyne') preview = false;
+
         var tempo = null;
         if (spec.tempo !== undefined && spec.tempo !== null) {
             if (!isNum(spec.tempo) || spec.tempo <= 0 || spec.tempo > 1e4) return badJob('tempo is not a valid number');
@@ -464,6 +473,7 @@ var core = (function () {
         var created = isStr(spec.createdAt) && spec.createdAt !== '' ? spec.createdAt : isoString(new Date());
         var job = { version: 1, id: id, plugin: plugin, createdAt: created, placement: placement, realign: realign, clips: clips };
         if (output !== null) job.output = output;
+        if (preview) job.preview = true;
         if (tempo !== null) job.song = { tempo: tempo };
         if (trackIndex !== null) job.live = { trackIndex: trackIndex };
         return { ok: true, job: job };
@@ -608,7 +618,8 @@ var core = (function () {
     function planPlacement(spec) {
         if (!isObj(spec)) return badPlan('placement request is missing');
         var mode = spec.mode;
-        if (indexIn(PLACEMENTS, mode) < 0) return badPlan('unknown placement "' + oneLine(String(mode)) + '"');
+        // 'preview' is not a placement the user can choose: one preview of the Live preview, on its own track
+        if (mode !== 'preview' && indexIn(PLACEMENTS, mode) < 0) return badPlan('unknown placement "' + oneLine(String(mode)) + '"');
         var region = spec.region;
         if (!isObj(region) || !isNum(region.startBeats) || region.startBeats < 0) return badPlan('the source clip position is not known');
         var result = spec.result;
@@ -671,7 +682,21 @@ var core = (function () {
             ops.push({ op: 'verify', target: 'newClip', label: 'Checking the result clip', verify: verifyNew });
         }
 
-        if (mode === 'takeLane') {
+        if (mode === 'preview') {
+            // First preview: a new track right below the source track. Later ones: the previous preview clip is removed
+            // (seeded by the device as produced 'previewTrack' / 'previewClip') and the new one goes onto the same track.
+            if (spec.hasPreviewTrack === true) {
+                ops.push({ op: 'delete_clip', target: 'previewTrack', label: 'Removing the previous preview',
+                    args: [{ ref: 'previewClip' }] });
+            } else {
+                ops.push({ op: 'create_audio_track', target: 'song', label: 'Creating the preview track',
+                    args: [trackIndex + 1], produces: 'previewTrack' });
+                ops.push({ op: 'set', target: 'previewTrack', label: 'Naming the preview track', property: 'name',
+                    value: cut('Preview: ' + baseName, 60, false) });
+            }
+            clipTarget = 'previewTrack';
+            tail();
+        } else if (mode === 'takeLane') {
             ops.push({ op: 'create_take_lane', target: 'track', label: 'Creating take lane', args: [], produces: 'lane' });
             clipTarget = 'lane';
             tail();

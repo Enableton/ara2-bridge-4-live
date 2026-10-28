@@ -15,7 +15,9 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -25,6 +27,8 @@
 #include <vector>
 
 #import <Cocoa/Cocoa.h>
+
+extern std::atomic<unsigned long long> gBridgeContentChanges;   // ARAModelUpdateController.cpp (SDK patch)
 
 // The window: the plug-in's editor above a bar with Play, Apply to Live, Cancel, a status line and the
 // Output menu (the device the host plays to: an ARA plug-in has no audio device settings of its own, and a
@@ -43,6 +47,9 @@ namespace
     constexpr CGFloat kBarHeight { 44.0 };
     constexpr double kPollSeconds { 0.1 };
     constexpr double kCloseAfterApplySeconds { 1.2 };
+    constexpr double kPreviewBaselineSeconds { 2.0 };   // after the window opened: when the unedited render is taken
+    constexpr double kPreviewQuietSeconds { 0.4 };      // no edit notification for this long: render the preview
+    constexpr int kPreviewKeep { 3 };                   // preview folders kept in the job folder
     constexpr double kOutputCheckSeconds { 0.5 };   // after Play: did the output device call for audio?
     constexpr CGFloat kOutputMenuWidth { 230.0 };
 
@@ -76,6 +83,17 @@ namespace
         std::string idleText;               // the editing phase's status text, shown with the output
         int playGeneration { 0 };           // which Play the pending output check belongs to
         int64_t callbacksAtPlay { 0 };
+
+        // Live preview (job.preview, melodyne): after an edit the clip is rendered again and published as
+        // preview-<n>/ in the job folder; only audio that differs from the last published state is published
+        bool previewBusy { false };         // a preview render is running (its idle loop pumps events)
+        bool previewBaselined { false };    // the unedited render was taken (previewLastHash)
+        bool previewDirty { false };
+        int previewIndex { 0 };
+        unsigned long long previewSeenCount { 0 };
+        uint64_t previewLastHash { 0 };
+        std::chrono::steady_clock::time_point openedAt { std::chrono::steady_clock::now () };
+        std::chrono::steady_clock::time_point previewDirtyAt;
     };
     State S;
 
@@ -871,6 +889,8 @@ namespace
     if (S.phase != Phase::applying && ! S.stopping)
         S.context->document->notifyModelUpdates ();
 
+    [self previewPoll];
+
     if (S.playback != nullptr)
     {
         // the button follows the playback state, whoever changed it (the button, the plug-in's transport,
@@ -900,7 +920,7 @@ namespace
     }
 
     // a stop signal while editing closes the job like Cancel (during Apply the idle function handles it)
-    if (bridge::stopRequested () && S.phase != Phase::applying && ! S.stopping)
+    if (bridge::stopRequested () && S.phase != Phase::applying && ! S.previewBusy && ! S.stopping)
     {
         if (S.phase == Phase::editing)
             writeCancelled ("stopped by " + signalName (bridge::stopSignal ()) + " before Apply", bridge::kExitStopped);
@@ -1050,10 +1070,120 @@ namespace
     self.outputMenu.enabled = enabled;
 }
 
+// Live preview. Called from the poll timer (100 ms) while editing. The first call after kPreviewBaselineSeconds takes
+// the unedited render (a hash only, nothing is published); after that every change of the plug-in's content-changed
+// counter that stays quiet for kPreviewQuietSeconds renders the clip again, and a render that differs from the last
+// published state is published through bridge::writePreview, the same pipeline as Apply.
+- (void) previewPoll
+{
+    AppContext& context { *S.context };
+    if (! context.job.preview || context.job.plugin != "melodyne" || S.phase != Phase::editing || S.stopping || S.previewBusy)
+        return;
+    const auto now { std::chrono::steady_clock::now () };
+    if (! S.previewBaselined)
+    {
+        if (std::chrono::duration<double> (now - S.openedAt).count () >= kPreviewBaselineSeconds)
+            [self previewRender: YES];
+        return;
+    }
+    const unsigned long long count { gBridgeContentChanges.load () };
+    if (count != S.previewSeenCount)
+    {
+        S.previewSeenCount = count;
+        S.previewDirty = true;
+        S.previewDirtyAt = now;
+        return;
+    }
+    if (S.previewDirty && std::chrono::duration<double> (now - S.previewDirtyAt).count () >= kPreviewQuietSeconds)
+        [self previewRender: NO];
+}
+
+- (void) previewRender: (BOOL) baseline
+{
+    AppContext& context { *S.context };
+    S.previewBusy = true;
+    S.previewDirty = false;
+    S.previewSeenCount = gBridgeContentChanges.load ();
+    ApplyIdle idle { context.applyTimeoutSec, context.stopGraceSec };
+    const auto started { std::chrono::steady_clock::now () };
+
+    bridge::Audio rendered;
+    std::string error, diagnostics;
+    double analysisSeconds { 0.0 };
+    const auto quiet = [] (const std::string&) {};
+    bool ok { context.document->waitForAnalysis (std::ref (idle), analysisSeconds) };
+    if (! ok)
+        error = "the plug-in's analysis did not finish";
+    else
+        ok = renderJobClip (*context.document, context.job, context.layout, std::ref (idle), quiet, rendered, error, diagnostics);
+
+    if (ok && ! idle.timedOut () && ! S.cancelRequested && ! bridge::stopRequested ())
+    {
+        uint64_t hash { 1469598103934665603ull };
+        for (const auto& channel : rendered.channels)
+            for (const float v : channel)
+            {
+                uint32_t bits;
+                std::memcpy (&bits, &v, sizeof bits);
+                hash = (hash ^ bits) * 1099511628211ull;
+            }
+        const double renderSeconds { std::chrono::duration<double> (std::chrono::steady_clock::now () - started).count () };
+        char text[160];
+        if (baseline)
+        {
+            S.previewLastHash = hash;
+            S.previewBaselined = true;
+            std::snprintf (text, sizeof text, "live preview: ready (unedited render in %.2f s)", renderSeconds);
+            say (text);
+        }
+        else if (hash == S.previewLastHash)
+        {
+            std::snprintf (text, sizeof text, "live preview: edit did not change the audio (render %.2f s)", renderSeconds);
+            say (text);
+        }
+        else
+        {
+            const int index { ++S.previewIndex };
+            const auto publish = [&] (bridge::Audio& out, std::string&, std::string&) { out = std::move (rendered); return true; };
+            const auto info { bridge::writePreview (context.job, index, context.original, context.layout.regions[context.layout.renderClip].sourceStart,
+                                                    publish, [] (const std::string& line) { say (line); }) };
+            if (info.status == "ok")
+            {
+                S.previewLastHash = hash;
+                bridge::prunePreviews (context.job.dir, kPreviewKeep);
+                std::snprintf (text, sizeof text, "live preview: published preview-%d (render %.2f s)", index, renderSeconds);
+                say (text);
+            }
+            else
+                say ("live preview: not published: " + info.message);
+        }
+    }
+    else if (! (S.cancelRequested || bridge::stopRequested ()))
+        say ("live preview: render failed: " + error);
+    S.previewBusy = false;
+
+    // Cancel, close, Quit or a stop signal arrived while rendering: close the job as the editing phase would
+    if (bridge::stopRequested ())
+    {
+        writeCancelled ("stopped by " + signalName (bridge::stopSignal ()) + " before Apply", bridge::kExitStopped);
+        [self closeWindow];
+    }
+    else if (S.cancelRequested)
+    {
+        S.cancelRequested = false;
+        [self closeWindow];      // windowWillClose writes the cancelled result
+    }
+}
+
 - (void) applyClicked: (id) sender
 {
     if (S.phase != Phase::editing || S.stopping)
         return;
+    if (S.previewBusy)      // a preview render is running: Apply follows when it ends
+    {
+        [self schedule: @selector (applyClicked:) after: 0.2];
+        return;
+    }
     S.phase = Phase::applying;
     S.cancelRequested = false;
     S.playback->stop ();        // the editor instance does not render while the offline render runs
@@ -1158,7 +1288,7 @@ namespace
 
 - (void) cancelClicked: (id) sender
 {
-    if (S.phase == Phase::applying)
+    if (S.phase == Phase::applying || S.previewBusy)
     {
         S.cancelRequested = true;
         [self setStatusText: @"Cancelling..."];
@@ -1169,7 +1299,7 @@ namespace
 
 - (BOOL) windowShouldClose: (NSWindow*) sender
 {
-    if (S.phase == Phase::applying)     // the render stops first; runApply then closes the window
+    if (S.phase == Phase::applying || S.previewBusy)     // the render stops first; runApply then closes the window
     {
         S.cancelRequested = true;
         [self setStatusText: @"Cancelling..."];
@@ -1206,7 +1336,7 @@ namespace
 - (void) quitClicked: (id) sender
 {
     say ("quit requested");
-    if (S.phase == Phase::applying)
+    if (S.phase == Phase::applying || S.previewBusy)
     {
         S.cancelRequested = true;
         [self setStatusText: @"Cancelling..."];

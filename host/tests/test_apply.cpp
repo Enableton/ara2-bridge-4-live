@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -428,4 +429,87 @@ TEST (apply_output_dub_is_unchanged_and_guide_needs_a_window)
     std::string error;
     REQUIRE (bridge::readResult (bad, read, error));
     CHECK (read.status == "error");
+}
+
+TEST (preview_is_published_in_its_own_folder_and_leaves_the_job_alone)
+{
+    const std::string dir { makeTempDir ("preview_basic") };
+    const bridge::Audio original { tone (44100, 44100, 2) };
+    bridge::Job j { job (dir, "melodyne", true) };
+    j.keepRaw = true;      // never applied to a preview
+    const auto info { bridge::writePreview (j, 3, original, 100, returns (original)) };
+    CHECK (info.status == "ok");
+    CHECK (info.resultPath == dir + "/preview-3/result.wav");
+    CHECK (info.sourceStartFrame == 100);
+    CHECK (info.frames == 44100);
+
+    CHECK (! bridge::resultExists (dir));
+    CHECK (! std::filesystem::exists (dir + "/result.wav"));
+    CHECK (std::filesystem::exists (dir + "/preview-3/result.json"));
+    CHECK (std::filesystem::exists (dir + "/preview-3/result.wav"));
+    CHECK (! std::filesystem::exists (dir + "/preview-3/result.wav.tmp"));
+    CHECK (! std::filesystem::exists (dir + "/preview-3/realign-debug.json"));
+
+    bridge::ResultInfo read;
+    bridge::Audio audio;
+    REQUIRE (readBack (dir + "/preview-3", read, audio));
+    CHECK (read.status == "ok");
+    CHECK (read.resultPath == dir + "/preview-3/result.wav");
+    CHECK (audio.channels == original.channels);
+
+    // the real result can still be written afterwards
+    const auto final { bridge::applyJob (job (dir, "melodyne", true), original, 100, returns (original), true) };
+    CHECK (final.status == "ok");
+    CHECK (bridge::resultExists (dir));
+}
+
+TEST (preview_realigns_like_apply)
+{
+    const std::string dir { makeTempDir ("preview_realign") };
+    const int64_t frames { 2 * 44100 };
+    const bridge::Audio original { tone (44100, frames, 1) };
+    bridge::Audio early { tone (44100, frames, 1, 31.0) };      // the tail arrives 31 samples early, as after a Melodyne edit
+    const auto plain { bridge::applyJob (job (makeTempDir ("preview_realign_ref"), "melodyne", true), original, 0, returns (early), true) };
+    const auto info { bridge::writePreview (job (dir, "melodyne", true), 1, original, 0, returns (early)) };
+    CHECK (info.status == "ok");
+    CHECK (info.realignApplied == plain.realignApplied);
+    CHECK (info.realignReason == plain.realignReason);
+}
+
+TEST (preview_failure_leaves_no_folder)
+{
+    const std::string dir { makeTempDir ("preview_fail") };
+    const bridge::Audio original { tone (44100, 22050, 1) };
+    const auto info { bridge::writePreview (job (dir, "melodyne", true), 1, original, 0,
+                                            [] (bridge::Audio&, std::string& error, std::string&) { error = "the render was stopped"; return false; }) };
+    CHECK (info.status == "error");
+    CHECK (info.message == "the render was stopped");
+    CHECK (! std::filesystem::exists (dir + "/preview-1"));
+    CHECK (! bridge::resultExists (dir));
+
+    // a render of the wrong shape fails the same way
+    const auto wrong { bridge::writePreview (job (dir, "melodyne", true), 2, original, 0, returns (tone (44100, 100, 1))) };
+    CHECK (wrong.status == "error");
+    CHECK (! std::filesystem::exists (dir + "/preview-2"));
+}
+
+TEST (prune_previews_keeps_the_newest_and_touches_nothing_else)
+{
+    const std::string dir { makeTempDir ("preview_prune") };
+    for (const char* name : { "preview-1", "preview-2", "preview-9", "preview-10", "preview-x", "preview-", "previews", "other" })
+        std::filesystem::create_directory (dir + "/" + name);
+    { std::ofstream (dir + "/preview-5") << "a file, not a folder"; }
+    { std::ofstream (dir + "/job.json") << "{}"; }
+
+    CHECK (bridge::prunePreviews (dir, 2) == 2);     // 1 and 2 go; 9 and 10 stay (numeric order, not text order)
+    CHECK (! std::filesystem::exists (dir + "/preview-1"));
+    CHECK (! std::filesystem::exists (dir + "/preview-2"));
+    CHECK (std::filesystem::exists (dir + "/preview-9"));
+    CHECK (std::filesystem::exists (dir + "/preview-10"));
+    for (const char* name : { "preview-x", "preview-", "previews", "other", "preview-5", "job.json" })
+        CHECK (std::filesystem::exists (dir + "/" + name));
+
+    CHECK (bridge::prunePreviews (dir, 2) == 0);
+    CHECK (bridge::prunePreviews (dir, 0) == 2);
+    CHECK (bridge::prunePreviews (dir + "/missing", 2) == 0);
 }

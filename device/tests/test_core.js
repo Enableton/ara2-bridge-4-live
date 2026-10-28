@@ -387,6 +387,16 @@ test('buildJob: Melodyne job matches the host contract', () => {
   deq(JSON.parse(JSON.stringify(j)), j, 'survives JSON');
 });
 
+test('buildJob: preview is a Melodyne option, off unless true', () => {
+  eq(core.buildJob(melSpec()).job.preview, undefined, 'absent by default');
+  eq(core.buildJob(melSpec({ preview: false })).job.preview, undefined, 'false is not written');
+  eq(core.buildJob(melSpec({ preview: true })).job.preview, true);
+  eq(core.buildJob(melSpec({ preview: 1 })).job.preview, true, 'live.toggle sends 1');
+  eq(core.buildJob(melSpec({ preview: null })).job.preview, undefined);
+  eq(core.buildJob(vocSpec({ preview: true })).job.preview, undefined, 'VocAlign has no preview');
+  jobBad(melSpec({ preview: 'yes' }), /preview must be true or false/);
+});
+
 test('buildJob: createdAt defaults to an ISO timestamp; unknown input keys are dropped', () => {
   const spec = melSpec({ createdAt: undefined, extra: 1 });
   spec.clips[0].junk = 'x';
@@ -627,6 +637,30 @@ test('planPlacement takeLane: ordered ops', () => {
   eq(v.warping, 0); eq(v.looping, 0, 'a fresh clip reads looping 1 until Warp is off'); eq(v.startBeats, 32); near(v.lengthSec, 643663 / 44100, 1e-12); eq(v.lengthTolSec, 0.002); eq(v.tempo, TEMPO);
   eq(p.ops[0].produces, 'lane'); eq(p.ops[1].produces, 'newClip');
   deq(JSON.parse(JSON.stringify(p.ops)), p.ops, 'plain JSON objects');
+});
+
+test('planPlacement preview: first preview makes a named track below the source, later ones replace the clip', () => {
+  const first = core.planPlacement(planSpec('preview', { trackIndex: 3, pluginLabel: 'preview', existingClips: undefined, sourceClipId: undefined }));
+  ok(first.ok, 'ok: ' + first.reason);
+  deq(kinds(first.ops), ['create_audio_track@song', 'set:name@previewTrack', 'create_audio_clip@previewTrack', 'set:warping@newClip',
+    'set:name@newClip', 'set:gain@newClip', 'verify@newClip']);
+  deq(first.ops[0].args, [4]); eq(first.ops[0].produces, 'previewTrack');
+  eq(first.ops[1].value, 'Preview: render_1');
+  deq(first.ops[2].args, [planSpec().resultFile, 32]);
+  eq(first.ops[4].value, 'render_1 (preview)');
+  eq(first.rollbackAfter.length, 0, 'nothing destructive');
+
+  const next = core.planPlacement(planSpec('preview', { trackIndex: 3, pluginLabel: 'preview', hasPreviewTrack: true }));
+  ok(next.ok, 'ok: ' + next.reason);
+  deq(kinds(next.ops), ['delete_clip@previewTrack', 'create_audio_clip@previewTrack', 'set:warping@newClip', 'set:name@newClip',
+    'set:gain@newClip', 'verify@newClip']);
+  deq(next.ops[0].args, [{ ref: 'previewClip' }]);
+  ok(!next.ops.some((o) => o.destructive), 'the delete is not the destructive step');
+  for (const o of next.ops) ok(o.target !== 'track', 'nothing is created or changed on the user\'s track: ' + o.op);
+  for (const o of first.ops) ok(o.target !== 'track', 'nothing is created or changed on the user\'s track: ' + o.op);
+  // the user's placement list is unchanged: 'preview' is not a choice
+  planBad(planSpec('previews'), /unknown placement/);
+  eq(core.buildJob(melSpec({ placement: 'preview' })).ok, false, 'preview is no placement for a job');
 });
 
 test('planPlacement newTrack: track at trackIndex+1, clip at region.startBeats', () => {

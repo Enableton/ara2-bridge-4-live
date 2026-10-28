@@ -452,6 +452,24 @@ function makeFakeRunner(fx, opts) {
     }
     throw new Error('fake runner: unexpected message ' + sel);
   }
+  // The host publishes a Live preview: preview-<n>/result.wav (+ result.json), reported by the runner as a `status` message
+  // with state "preview". o: {n, frames, resultJson (override), noWav}.
+  r.previewN = 0;
+  r.preview = (o) => {
+    o = o || {};
+    const j = r.job;
+    assert.ok(j, 'a job is running');
+    const n = o.n || ++r.previewN;
+    const dir = path.join(j.jobDir, 'preview-' + n);
+    const c = j.job.clips[0];
+    const rate = c.sampleRate || 44100;
+    const frames = o.frames || Math.round((c.endSec - c.startSec) * rate);
+    if (!o.noWav) writeWav(path.join(dir, 'result.wav'), frames, rate);
+    const rj = o.resultJson !== undefined ? o.resultJson : { version: 1, id: j.id, status: 'ok', message: '', resultPath: path.join(dir, 'result.wav'),
+      sourceStartFrame: Math.round(c.startSec * rate), frames, sampleRate: rate, realign: { applied: false, reason: 'nothing-to-do', shiftCount: 0 } };
+    r.send('hostStatus', { state: 'preview', n, previewDir: dir, resultJson: rj, jobId: j.id, mode: 'window', alive: true });
+    return rj;
+  };
   // The host finishes. o: {status, frames, sampleRate, message, realign, resultJson (override), noWav, truncate,
   // oldHost (ignore output "guide" like a BridgeHost without it)}. A job with output "guide" gets the host's window:
   // frames = max(guide, offset + dub), placeAt "guide", offsetFrames, droppedFrames (JobLayout.h).
@@ -1746,6 +1764,223 @@ test('guide.json and device.log are pure ASCII; a long umlaut/emoji name and pat
 });
 
 // ---- integration: real runner + real BridgeHost --autorender, placement on the fake Live
+// ---- Live preview
+function previewFixture(o) {
+  o = o || {};
+  const fx = makeFixture(o);
+  fx.boot();
+  if (o.placement) fx.sb.settings('placement', o.placement);
+  if (o.preview !== false) fx.sb.settings('preview', 1);
+  fx.sb.sendMelodyne();
+  fx.pump();
+  fx.launch = fx.runner.launches[0];
+  return fx;
+}
+const previewTrackOf = (fx) => fx.live.tracks().filter((t) => fx.initialTrackIds.indexOf(t.id) < 0);
+function previewClipOk(fx, track, n) {
+  const c = fx.live.liveClips(track);
+  assert.strictEqual(c.length, 1, 'one clip on the Preview track');
+  const p = c[0].props;
+  assert.strictEqual(p.warping, 0, 'unwarped');
+  assert.strictEqual(p.looping, 0);
+  near(p.start_time, 16, 1e-9, 'at the source clip\'s position');
+  near(p.length * 60 / fx.live.song.tempo, 4, 0.002, 'as long as the source region');
+  assert.strictEqual(p.name, 'Vocal take (preview)');
+  near(p.gain, 0.5, 1e-9, 'gain copied');
+  assert.ok(p.file_path.endsWith('/preview-' + n + '/result.wav'), 'plays the host\'s preview file: ' + p.file_path);
+}
+
+test('live preview: the job asks for it; the first preview makes a Preview track below the source, the next replaces its clip', () => {
+  const fx = previewFixture();
+  invariants(fx);
+  assert.strictEqual(fx.launch.job.preview, true);
+  assert.ok(/live preview: on/.test(fx.statuses().filter((x) => /Melodyne is open/.test(x))[0]), 'the open line says so');
+  fx.runner.preview();
+  fx.pump();
+  let tracks = fx.live.tracks();
+  assert.strictEqual(tracks.length, 3);
+  assert.strictEqual(tracks[0], fx.t0); assert.strictEqual(tracks[2], fx.t1);
+  const pt = tracks[1];
+  assert.strictEqual(pt.name, 'Preview: Vocal take');
+  previewClipOk(fx, pt, 1);
+  assert.ok(/^Preview 1 is on the Preview track\. Mute the original track to compare\.$/.test(fx.status()), fx.status());
+  const firstClip = fx.live.liveClips(pt)[0].id;
+  assert.deepStrictEqual(fx.live.snapshot()[0], fx.initial[0], 'the user\'s track is untouched');
+  assert.strictEqual(fx.runner.copies.length, 0, 'previews are not copied');
+  assert.deepStrictEqual(fx.lastUi('busy'), [1], 'the job is still busy: the window is open');
+
+  fx.runner.preview();
+  fx.pump();
+  tracks = fx.live.tracks();
+  assert.strictEqual(tracks.length, 3, 'still one Preview track');
+  assert.strictEqual(tracks[1], pt);
+  previewClipOk(fx, pt, 2);
+  assert.notStrictEqual(fx.live.liveClips(pt)[0].id, firstClip, 'a new clip');
+  assert.ok(!fx.live.exists(fx.live.objs[firstClip]), 'the old preview clip is gone');
+  assert.ok(/^Preview 2 is on the Preview track/.test(fx.status()), fx.status());
+  assert.strictEqual(fx.live.clock.tasks.size, 0);
+  // never a clip created on, or removed from, the user's own tracks
+  assert.deepStrictEqual(fx.live.snapshot()[0], fx.initial[0]);
+  assert.deepStrictEqual(fx.live.snapshot()[2], fx.initial[1]);
+});
+
+test('live preview: Apply removes the Preview track first, then places the result (take lane, new track and replace)', () => {
+  for (const placement of ['takeLane', 'newTrack', 'replace']) {
+    const fx = previewFixture({ placement });
+    fx.runner.preview();
+    fx.pump();
+    assert.strictEqual(fx.live.tracks().length, 3);
+    fx.runner.finish();
+    fx.pump();
+    invariants(fx);
+    assert.ok(/^Done\./.test(fx.status()), placement + ': ' + fx.status());
+    assert.ok(!/Preview/.test(fx.live.tracks().map((t) => t.name).join('|')), placement + ': the Preview track is gone');
+    const names = fx.live.allClips().map((e) => fx.live.clipSnap(e.clip).name);
+    assert.ok(names.every((n) => !/preview/.test(n)), placement + ': no preview clip is left: ' + names.join(', '));
+    const want = { takeLane: 2, newTrack: 3, replace: 3 }[placement];   // replace: the muted backup track stays
+    assert.strictEqual(fx.live.tracks().length, want, placement + ': track count');
+    if (placement === 'replace') originalSurvives(fx);
+    assert.deepStrictEqual(fx.lastUi('busy'), [0]);
+    assert.strictEqual(fx.live.clock.tasks.size, 0);
+  }
+});
+
+test('live preview: Cancel (or a failed job) removes the Preview track and says what the job said', () => {
+  let fx = previewFixture();
+  fx.runner.preview();
+  fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 3);
+  fx.runner.finish({ status: 'cancelled', message: 'closed without applying', resultJson: { version: 1, id: fx.runner.job.id, status: 'cancelled', message: 'closed without applying' } });
+  fx.pump();
+  assert.deepStrictEqual(fx.live.snapshot(), fx.initial, 'back to the initial set');
+  assert.ok(/^Cancelled\./.test(fx.status()) || /ancel/.test(fx.status()), fx.status());
+  assert.deepStrictEqual(fx.lastUi('busy'), [0]);
+  assert.strictEqual(fx.live.clock.tasks.size, 0);
+
+  fx = previewFixture();
+  fx.runner.preview();
+  fx.pump();
+  fx.runner.finish({ status: 'error', message: 'the plug-in crashed', resultJson: { version: 1, id: fx.runner.job.id, status: 'error', message: 'the plug-in crashed' } });
+  fx.pump();
+  assert.deepStrictEqual(fx.live.snapshot(), fx.initial);
+  assert.ok(/the plug-in crashed/.test(fx.status()), fx.status());
+  assert.deepStrictEqual(fx.lastUi('busy'), [0]);
+});
+
+test('live preview: the host ends while a preview is being placed -> the preview finishes, then the result is placed', () => {
+  const fx = previewFixture({ placement: 'newTrack' });
+  fx.runner.preview();      // the sequence starts at once ...
+  fx.runner.finish();       // ... and Apply arrives before it ends
+  fx.pump();
+  invariants(fx);
+  assert.ok(/^Done\./.test(fx.status()), fx.status());
+  assert.ok(!/Preview/.test(fx.live.tracks().map((t) => t.name).join('|')));
+  assert.strictEqual(fx.live.tracks().length, 3, 'preview track removed, result track added');
+  resultClipOk(fx, fx.live.liveClips(fx.live.tracks()[1])[0], 16, 'Vocal take (Melodyne)');
+});
+
+test('live preview: previews that arrive while one is placed collapse to the newest', () => {
+  const fx = previewFixture();
+  fx.runner.preview(); fx.runner.preview(); fx.runner.preview(); fx.runner.preview();
+  fx.pump();
+  const pt = fx.live.tracks()[1];
+  previewClipOk(fx, pt, 4);
+  const created = fx.live.calls.filter((c) => c.fn === 'create_audio_clip').length;
+  assert.ok(created <= 2, 'at most the first and the newest were placed, not all four: ' + created);
+});
+
+test('live preview: off by default, and a preview message without the toggle is ignored', () => {
+  const fx = previewFixture({ preview: false });
+  assert.strictEqual(fx.launch.job.preview, undefined);
+  fx.runner.preview();
+  fx.pump();
+  assert.deepStrictEqual(fx.live.snapshot(), fx.initial, 'nothing placed');
+  fx.runner.finish();
+  fx.pump();
+  assert.ok(/^Done\./.test(fx.status()), fx.status());
+});
+
+test('live preview: unusable previews are ignored (error result, missing file, short file, other job)', () => {
+  const fx = previewFixture();
+  fx.runner.preview({ resultJson: { version: 1, id: 'x', status: 'error', message: 'no' } });
+  fx.runner.preview({ noWav: true });
+  fx.runner.preview({ frames: 10, resultJson: undefined });          // a 10-frame file is not what the result says
+  fx.pump();
+  const bad = fx.runner.preview({ n: 9 });
+  fs.writeFileSync(bad.resultPath, Buffer.alloc(50));                 // truncated after the fact
+  fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 2, 'no track was made for any of them');
+  fx.sb.hostStatus(enc({ state: 'preview', n: 11, jobId: 'another-job', resultJson: bad, previewDir: '/x' }));
+  fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 2);
+  // a good one still works afterwards
+  fx.runner.preview({ n: 12 });
+  fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 3);
+  assert.ok(fx.live.liveClips(fx.live.tracks()[1])[0].props.file_path.endsWith('/preview-12/result.wav'));
+});
+
+test('live preview: a failing preview rolls back its own objects and the next one works', () => {
+  const fx = previewFixture({ live: { faults: [{ fn: 'create_audio_clip', nth: 1, mode: 'throw' }] } });
+  fx.runner.preview();
+  fx.pump();
+  assert.deepStrictEqual(fx.live.snapshot(), fx.initial, 'the new Preview track was removed again');
+  assert.ok(/^No preview: Placing the result clip failed/.test(fx.status()), fx.status());
+  assert.deepStrictEqual(fx.lastUi('busy'), [1], 'the job goes on: the window is open');
+  fx.runner.preview();
+  fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 3);
+  previewClipOk(fx, fx.live.tracks()[1], 2);
+  // a failing replacement removes the old preview as well, and the next starts from scratch
+  const fx2 = previewFixture({ live: { faults: [{ fn: 'create_audio_clip', nth: 2, mode: 'throw' }] } });
+  fx2.runner.preview();
+  fx2.pump();
+  assert.strictEqual(fx2.live.tracks().length, 3);
+  fx2.runner.preview();
+  fx2.pump();
+  assert.deepStrictEqual(fx2.live.snapshot(), fx2.initial, 'both preview objects are gone');
+  fx2.runner.preview();
+  fx2.pump();
+  previewClipOk(fx2, fx2.live.tracks()[1], 3);
+  fx2.runner.finish();
+  fx2.pump();
+  assert.ok(/^Done\./.test(fx2.status()), fx2.status());
+  assert.strictEqual(fx2.live.tracks().length, 2);
+});
+
+test('live preview: the Preview track deleted by the user, the source track deleted, the tempo changed', () => {
+  const fx = previewFixture();
+  fx.runner.preview();
+  fx.pump();
+  const pt = fx.live.tracks()[1];
+  fx.live.deleteTrackById ? fx.live.deleteTrackById(pt.id) : fx.live.song.tracks.splice(1, 1);
+  fx.runner.preview();
+  fx.pump();
+  assert.strictEqual(fx.live.tracks().length, 3, 'a new Preview track was made');
+  previewClipOk(fx, fx.live.tracks()[1], 2);
+  fx.live.song.tempo = 121;
+  fx.runner.preview();
+  fx.pump();
+  assert.ok(/^No preview: the song tempo changed\.$/.test(fx.status()), fx.status());
+  fx.live.song.tempo = 120;
+  fx.runner.finish();
+  fx.pump();
+  assert.ok(/^Done\./.test(fx.status()), fx.status());
+  assert.ok(!/Preview/.test(fx.live.tracks().map((t) => t.name).join('|')));
+});
+
+test('live preview: removing the Preview track fails at the end -> the result stays, a note says what to delete', () => {
+  const fx = previewFixture({ live: { faults: [{ fn: 'delete_track', nth: 1, mode: 'noop' }] } });
+  fx.runner.preview();
+  fx.pump();
+  fx.runner.finish();
+  fx.pump();
+  assert.ok(/^Done\./.test(fx.status()), fx.status());
+  assert.ok(/Note: .*Preview track could not be removed; delete it by hand/.test(fx.status()), fx.status());
+  const lanes = fx.t0.lanes.length;
+  assert.strictEqual(lanes, 1, 'the result went to a take lane');
+});
+
 test('integration: bridge -> real runner -> real BridgeHost (headless) -> placement on the fake Live model', async () => {
   if (SKIP_REAL) { console.log('   skipped (--skip-real)'); return; }
   if (!fs.existsSync(REAL_HOST)) { console.log('   skipped (BridgeHost not built at ' + REAL_HOST + ')'); return; }

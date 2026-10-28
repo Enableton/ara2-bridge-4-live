@@ -37,6 +37,17 @@ namespace bridge
     ResultInfo applyJob (const Job& job, const Audio& original, int64_t sourceStartFrame, const RenderFunction& render,
                          bool writeResultOnError, const LogFunction& log = {}, const GuideWindow& guideWindow = {});
 
+    // Live preview (window mode): the same pipeline as applyJob for the editor's current state, published in its own
+    // folder <job.dir>/preview-<index>/ (result.wav, then result.json: its existence means "done", exactly as for
+    // the job) so that the job's own result.wav / result.json stay untouched and the job is not finished. keepRaw is
+    // not applied. Returns applyJob's result; on failure the folder is removed again. 'index' must be 1 or more.
+    ResultInfo writePreview (const Job& job, int index, const Audio& original, int64_t sourceStartFrame, const RenderFunction& render,
+                             const LogFunction& log = {}, const GuideWindow& guideWindow = {});
+
+    // Removes all preview-<n> folders of the job except the newest 'keepNewest' (by n); the device may still play the
+    // last one. Other entries are never touched. Returns how many folders were removed.
+    int prunePreviews (const std::string& jobDir, int keepNewest);
+
     // Writes a 32-bit float WAV to a temp file next to 'path', flushes it to disk and renames it to 'path'.
     // false with 'error' (and no temp file left) on failure.
     bool writeWavAtomically (const std::string& path, const Audio& audio, std::string& error);

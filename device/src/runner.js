@@ -293,9 +293,36 @@ function createRunner(opts) {
       delays.releaseAfterResultMs);
   }
 
+  // Live preview (job.preview, window mode): the host publishes every preview as <job>/preview-<n>/result.wav and,
+  // last, result.json. The newest complete one that was not reported yet goes out once as a `status` message with
+  // state "preview" (the patch routes `status` to js already); older ones that were never reported are skipped. A
+  // preview-<n> whose result.json does not parse yet (being written) is looked at again by the next poll.
+  function checkPreview(j) {
+    if (j.mode !== 'window' || !isObj(j.jobObj) || j.jobObj.preview !== true || j.reported || j.exited) return;
+    let names;
+    try { names = fs.readdirSync(j.jobDir); } catch (e) { return; }
+    const found = [];
+    for (const name of names) {
+      const m = /^preview-(\d{1,9})$/.exec(name);
+      if (m && Number(m[1]) > (j.lastPreview || 0)) found.push(Number(m[1]));
+    }
+    found.sort((a, b) => b - a);
+    for (const n of found) {
+      const dir = nodePath.join(j.jobDir, 'preview-' + n);
+      let value;
+      try { value = JSON.parse(fs.readFileSync(nodePath.join(dir, 'result.json'), 'utf8')); } catch (e) { continue; }
+      if (!isObj(value)) continue;
+      j.lastPreview = n;
+      log('job ' + j.jobId + ' preview ' + n + ': ' + value.status);
+      send('status', Object.assign({ state: 'preview', n, previewDir: dir, resultJson: slimResult(value) }, describe(j)));
+      return;
+    }
+  }
+
   // One look at the job folder; called by the poll, by the exit grace timer and by the parse window timer.
   function check(j) {
     if (j.reported) return;
+    checkPreview(j);
     const file = nodePath.join(j.jobDir, 'result.json');
     let text = null;
     try { text = fs.readFileSync(file, 'utf8'); } catch (e) { text = null; }
