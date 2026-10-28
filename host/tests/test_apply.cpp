@@ -463,17 +463,22 @@ TEST (preview_is_published_in_its_own_folder_and_leaves_the_job_alone)
     CHECK (bridge::resultExists (dir));
 }
 
-TEST (preview_realigns_like_apply)
+TEST (preview_skips_the_timing_correction_but_the_result_still_has_it)
 {
     const std::string dir { makeTempDir ("preview_realign") };
     const int64_t frames { 2 * 44100 };
     const bridge::Audio original { tone (44100, frames, 1) };
     bridge::Audio early { tone (44100, frames, 1, 31.0) };      // the tail arrives 31 samples early, as after a Melodyne edit
-    const auto plain { bridge::applyJob (job (makeTempDir ("preview_realign_ref"), "melodyne", true), original, 0, returns (early), true) };
+    const auto real { bridge::applyJob (job (makeTempDir ("preview_realign_ref"), "melodyne", true), original, 0, returns (early), true) };
+    CHECK (real.realignApplied);                                  // the real result is corrected ...
     const auto info { bridge::writePreview (job (dir, "melodyne", true), 1, original, 0, returns (early)) };
     CHECK (info.status == "ok");
-    CHECK (info.realignApplied == plain.realignApplied);
-    CHECK (info.realignReason == plain.realignReason);
+    CHECK (! info.realignApplied);                                // ... the preview is the render as it is
+    CHECK (info.realignReason == "not-requested");
+    bridge::ResultInfo read;
+    bridge::Audio audio;
+    REQUIRE (readBack (dir + "/preview-1", read, audio));
+    CHECK (audio.channels == early.channels);
 }
 
 TEST (preview_failure_leaves_no_folder)

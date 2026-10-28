@@ -40,7 +40,8 @@ namespace bridge
     // Live preview (window mode): the same pipeline as applyJob for the editor's current state, published in its own
     // folder <job.dir>/preview-<index>/ (result.wav, then result.json: its existence means "done", exactly as for
     // the job) so that the job's own result.wav / result.json stay untouched and the job is not finished. keepRaw is
-    // not applied. Returns applyJob's result; on failure the folder is removed again. 'index' must be 1 or more.
+    // not applied and neither is the timing correction (realign): it costs seconds on a long clip and moves audio by less than a
+    // millisecond, so previews are not realigned (result.json says realign.reason "not-requested"); the real result still is. Returns applyJob's result; on failure the folder is removed again. 'index' must be 1 or more.
     ResultInfo writePreview (const Job& job, int index, const Audio& original, int64_t sourceStartFrame, const RenderFunction& render,
                              const LogFunction& log = {}, const GuideWindow& guideWindow = {});
 

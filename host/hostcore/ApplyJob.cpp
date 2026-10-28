@@ -209,6 +209,8 @@ namespace bridge
         preview.dir = job.dir + "/preview-" + std::to_string (index);
         preview.keepRaw = false;
         preview.durable = false;
+        preview.realign = false;    // measured: the timing correction takes 1-4 s for a 44 s clip and moves audio by well under a millisecond; the
+                                    // preview is for listening, Apply still corrects the real result
         std::error_code ec;
         std::filesystem::create_directory (preview.dir, ec);
         if (ec || ! std::filesystem::is_directory (preview.dir))

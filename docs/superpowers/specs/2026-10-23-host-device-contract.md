@@ -127,8 +127,9 @@ and `realign` handling as the job's result, `resultPath` pointing into that fold
 `result.json` are never touched and the job does not end: **only the real `result.json` of the job means done**.
 
 - When it renders: the plug-in's ARA "content changed" notifications (audio modification / playback region) are counted
-  (SDK patch, `gBridgeContentChanges`); 0.4 s after the last one the host renders (the same pipeline as Apply: two renders for
-  Melodyne with the doubled-sample repair, then realign). The first render, 2 s after the window opened, only
+  (SDK patch, `gBridgeContentChanges`); 0.4 s after the last one the host renders (the Apply pipeline without the timing correction: two renders for
+  Melodyne with the doubled-sample repair, but no realign - measured at 1-4 s for a 44 s clip, for a shift of well under a millisecond;
+  previews say `realign.reason` "not-requested", the real result is still corrected). The first render, 2 s after the window opened, only
   fixes what "unedited" sounds like (hash of the render): a preview is published only when the render differs from the
   last published one (the unedited state at first), so notifications that do not change the audio publish nothing.
   Measured with a real Melodyne: 0.06-0.1 s for a 7 s clip (also while the window plays), editor and playback unaffected.
@@ -145,7 +146,7 @@ and `realign` handling as the job's result, `resultPath` pointing into that fold
   result is placed (Apply), on Cancel and on every other way the job ends, but only if the device muted it (a clip the user had muted stays
   muted). A failing preview rolls back only what it made and never removes the audible track. The Preview tracks are removed when the job
   ends (before the result is placed for Apply; by a cleanup sequence for Cancel and failures).
-- Timing (measured with a real Melodyne, 44 s clip): the whole pipeline renders in 0.3 s; the host log has the breakdown per preview and
+- Timing (measured with a real Melodyne, 44 s clip): the renders take 0.3-0.5 s (realign would have added 1-4 s: no longer done for previews); the host log has the breakdown per preview and
   `device.log` the time from the host's publish to the swap. Preview WAVs are not flushed to disk before the rename.
 
 ## Transport sync (window mode, Melodyne, `sync: true`)
