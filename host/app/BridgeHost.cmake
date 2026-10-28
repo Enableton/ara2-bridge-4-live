@@ -40,6 +40,7 @@ add_executable(BridgeHost
     "${BH}/hostcore/RenderRepair.cpp"
     "${BH}/hostcore/KeepRaw.cpp"
     "${BH}/hostcore/TransportKey.cpp"
+    "${BH}/hostcore/SyncFollow.cpp"
     "${BH}/hostcore/Commands.cpp"
     "${BH}/hostcore/AudioOutput.cpp"
     # the app

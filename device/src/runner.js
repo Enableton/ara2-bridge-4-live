@@ -49,6 +49,8 @@ const DEFAULT_DELAYS = {
   sigkillMs: 3000,             // cancel ladder: second SIGTERM -> SIGKILL
   releaseAfterResultMs: 20000, // result reported but the host still alive: stop supervising after this
   findPluginsTimeoutMs: 30000,
+  previewPollMs: 60,           // result.json / preview poll of a job with live preview
+  syncPollMs: 30,              // transport sync: how often the host's sync-events.txt is read
   backstopMs: null,            // headless backstop override (ms); null = contract formula
 };
 
@@ -258,6 +260,8 @@ function createRunner(opts) {
     j.released = true;
     clearT(j.poll); clearT(j.parseWindow); clearT(j.graceTimer); clearT(j.releaseTimer);
     if (j.pollIv) { clearInterval(j.pollIv); timers.delete(j.pollIv); j.pollIv = null; }
+    if (j.syncIv) { clearInterval(j.syncIv); timers.delete(j.syncIv); j.syncIv = null; }
+    if (j.stdin) { try { j.stdin.end(); } catch (e) { /* ignore */ } j.stdin = null; }
     if (!j.exited) { try { j.child.unref(); } catch (e) { /* ignore */ } }
     log('job ' + j.jobId + ' released (' + why + '), pid ' + j.pid + (j.exited ? ' exited' : ' still running'));
     supervised.delete(j);
@@ -269,6 +273,7 @@ function createRunner(opts) {
     if (j.reported) return;
     j.reported = true;
     if (j.pollIv) { clearInterval(j.pollIv); timers.delete(j.pollIv); j.pollIv = null; }
+    if (j.syncIv) { clearInterval(j.syncIv); timers.delete(j.syncIv); j.syncIv = null; }
     clearT(j.parseWindow); clearT(j.graceTimer);
     const done = {
       jobDir: j.jobDir,
@@ -366,7 +371,8 @@ function createRunner(opts) {
     };
     j.child.on('exit', j.onExitL);
     j.child.on('error', j.onErrorL);
-    j.pollIv = setInterval(() => { try { check(j); } catch (e) { log('poll failed: ' + errStr(e)); } }, delays.pollMs);
+    const pollMs = j.mode === 'window' && isObj(j.jobObj) && j.jobObj.preview === true ? Math.min(delays.pollMs, delays.previewPollMs) : delays.pollMs;
+    j.pollIv = setInterval(() => { try { check(j); } catch (e) { log('poll failed: ' + errStr(e)); } }, pollMs);
     timers.add(j.pollIv);
     if (j.mode === 'headless') {
       const ms = typeof delays.backstopMs === 'number' ? delays.backstopMs : headlessBudget(j.jobObj).backstopMs;
@@ -421,11 +427,13 @@ function createRunner(opts) {
 
     const args = ['--job', jobDir];
     if (mode === 'headless') args.push('--autorender');
+    // transport sync (window mode, job.sync): the host reads the device's reports of Live's transport from its stdin
+    const syncJob = mode === 'window' && jobObj.sync === true;
     let child;
     let logFd = null;
     try {
       logFd = fs.openSync(nodePath.join(jobDir, 'host.log'), 'a');
-      child = spawn(host, args, { detached: true, stdio: ['ignore', logFd, logFd], env });
+      child = spawn(host, args, { detached: true, stdio: [syncJob ? 'pipe' : 'ignore', logFd, logFd], env });
     } catch (e) {
       sendError('spawn-failed', 'BridgeHost could not be started: ' + errStr(e), { jobId });
       return;
@@ -436,13 +444,63 @@ function createRunner(opts) {
     const j = {
       seq: ++jobSeq, jobId, jobDir, jobObj, mode, hostPath: host, child, pid: child.pid, startedAt: iso(),
       exited: false, exitCode: null, signal: null, reported: false, released: false,
-      graceOver: false, parseOver: false, cancelling: false,
+      graceOver: false, parseOver: false, cancelling: false, sync: syncJob, syncOffset: 0, syncPartial: '',
     };
+    if (syncJob && child.stdin) {
+      j.stdin = child.stdin;
+      j.stdin.on('error', () => { j.stdin = null; });        // the host went away: reports are dropped, never an exception
+    }
     job = j;
     supervised.add(j);
     log('launched ' + host + ' ' + args.join(' ') + ' pid ' + j.pid);
     startSupervision(j);
+    if (syncJob) {
+      j.syncIv = setInterval(() => { try { readSyncEvents(j); } catch (e) { log('sync events: ' + errStr(e)); } }, delays.syncPollMs);
+      timers.add(j.syncIv);
+    }
     send('started', { jobId, jobDir, pid: j.pid === undefined ? null : j.pid, mode, hostPath: host, startedAt: j.startedAt });
+  }
+
+  // Transport sync, host -> device: sync-events.txt in the job folder gets one line per event ("E <seq> <start|stop|seek>
+  // <posSec>", hostcore/SyncFollow.h); whole new lines go out as ONE status message {state: "transport", events:[...]}.
+  const SYNC_LINE_RE = /^E (\d{1,15}) (start|stop|seek) (-?\d+(?:\.\d+)?)$/;
+  function readSyncEvents(j) {
+    if (!j.sync) return;
+    const file = nodePath.join(j.jobDir, 'sync-events.txt');
+    let size;
+    try { size = fs.statSync(file).size; } catch (e) { return; }
+    if (size <= j.syncOffset) return;
+    let text;
+    try {
+      const fd = fs.openSync(file, 'r');
+      try {
+        const buf = Buffer.alloc(Math.min(size - j.syncOffset, 65536));
+        const n = fs.readSync(fd, buf, 0, buf.length, j.syncOffset);
+        j.syncOffset += n;
+        text = buf.toString('utf8', 0, n);
+      } finally { fs.closeSync(fd); }
+    } catch (e) { return; }
+    const data = j.syncPartial + text;
+    const cut = data.lastIndexOf('\n');
+    if (cut < 0) { j.syncPartial = data; return; }
+    j.syncPartial = data.substring(cut + 1);
+    const events = [];
+    for (const line of data.substring(0, cut).split('\n')) {
+      const m = SYNC_LINE_RE.exec(line);
+      if (m) events.push({ seq: Number(m[1]), kind: m[2], posSec: Number(m[3]) });
+    }
+    if (events.length) send('status', Object.assign({ state: 'transport', events }, describe(j)));
+  }
+
+  // Device -> host: {jobId, seq, posSec, playing}; one line "L <seq> <posSec> <playing>" to the host's stdin. Dropped (silently)
+  // when no sync job runs, for another job, or when the host's stdin is gone.
+  function onTransport(arg) {
+    let p;
+    try { p = decode(arg); } catch (e) { return; }
+    const j = job;
+    if (!isObj(p) || !j || !j.sync || !j.stdin || j.exited || p.jobId !== j.jobId) return;
+    if (!Number.isFinite(p.posSec) || Math.abs(p.posSec) > 1e7 || !Number.isInteger(p.seq) || p.seq < 0) return;
+    try { j.stdin.write('L ' + p.seq + ' ' + p.posSec.toFixed(6) + ' ' + (p.playing ? 1 : 0) + '\n'); } catch (e) { j.stdin = null; }
   }
 
   function onCancel() {
@@ -561,7 +619,7 @@ function createRunner(opts) {
   }
 
   const handlers = { launch: onLaunch, cancel: onCancel, status: onStatus, findplugins: onFindPlugins, ping: onPing,
-    copyresult: onCopyResult };
+    copyresult: onCopyResult, transport: onTransport };
 
   // Every handler is wrapped: nothing may throw into Max, and a returned promise is caught as well.
   function wrap(name, fn) {

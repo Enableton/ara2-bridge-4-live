@@ -100,7 +100,9 @@ function makeLive(opts) {
   const calls = [];
   const counts = {};
   const faults = opts.faults || [];
-  const song = { id: 1, type: 'Song', tempo: opts.tempo || 120, tracks: [], view: { detail_clip: 0 }, visibleAt: -1, goneAt: null };
+  const song = { id: 1, type: 'Song', tempo: opts.tempo || 120, tracks: [], view: { detail_clip: 0 }, visibleAt: -1, goneAt: null,
+    is_playing: 0, timeBase: { t: 0, at: 0 } };
+  const songTime = () => (song.is_playing ? song.timeBase.t + (clock.now - song.timeBase.at) / 1000 * song.tempo / 60 : song.timeBase.t);
   objs[1] = song;
   const broken = new Set();
   const delayTicks = () => (setup ? 0 : (typeof opts.delayTicks === 'function' ? opts.delayTicks() : (opts.delayTicks || 0)));
@@ -194,6 +196,8 @@ function makeLive(opts) {
     if (o.type === 'Song') {
       if (prop === 'tracks') return ids(song.tracks);
       if (prop === 'tempo') return [numOut(song.tempo)];
+      if (prop === 'is_playing') return [song.is_playing];
+      if (prop === 'current_song_time') return [numOut(songTime())];
     }
     if (o.type === 'Track') {
       if (prop === 'arrangement_clips') { if (broken.has(o.id)) throw new Error('arrangement_clips: unreadable'); return ids(o.clips); }
@@ -223,6 +227,11 @@ function makeLive(opts) {
     const mode = fault('set ' + prop);
     if (mode === 'throw') throw new Error('fault: set ' + prop);
     if (mode === 'noop') return;
+    if (o.type === 'Song') {
+      if (prop === 'current_song_time') song.timeBase = { t: Number(value), at: clock.now };
+      else song[prop] = Number(value);
+      return;
+    }
     if (o.type === 'Track') { if (prop === 'name') o.name = String(value); else o.props[prop] = Number(value); return; }
     const p = o.props;
     if (prop === 'warping') {
@@ -259,6 +268,14 @@ function makeLive(opts) {
       const live = song.tracks.filter((i) => exists(objs[i]));
       const t = objs[live[Number(args[0])]];
       if (t) gone(t);
+      ret = undefined;
+    } else if (o.type === 'Song' && (fn === 'continue_playing' || fn === 'start_playing')) {
+      song.timeBase = { t: songTime(), at: clock.now };
+      song.is_playing = 1;
+      ret = undefined;
+    } else if (o.type === 'Song' && fn === 'stop_playing') {
+      song.timeBase = { t: songTime(), at: clock.now };
+      song.is_playing = 0;
       ret = undefined;
     } else if (o.type === 'Track' && fn === 'create_take_lane') {
       ret = ['id', addLane(o).id];
@@ -399,7 +416,7 @@ function makeSandbox(live, extra) {
 // ------------------------------------------------------------------------------------------ fake runner (contract)
 function makeFakeRunner(fx, opts) {
   opts = opts || {};
-  const r = { launches: [], cancels: 0, statusReqs: 0, findplugins: 0, copies: [], cursor: 0, job: null,
+  const r = { transports: [], launches: [], cancels: 0, statusReqs: 0, findplugins: 0, copies: [], cursor: 0, job: null,
     plugins: opts.plugins || { melodyne: { found: true, path: '/Library/Audio/Plug-Ins/VST3/Melodyne.vst3' }, vocalign: { found: true } },
     answerStatus: opts.answerStatus !== false, autoStart: opts.autoStart !== false, copyMode: opts.copyMode || 'ok',
     noHost: !!opts.noHost, symbol: !!opts.symbol };
@@ -431,6 +448,7 @@ function makeFakeRunner(fx, opts) {
       return;
     }
     if (sel === 'cancel') { r.cancels++; r.send('hostStatus', r.job ? { state: 'cancelling', step: 'sigterm', jobId: r.job.id } : { state: 'idle' }); return; }
+    if (sel === 'transport') { r.transports.push(dec(m[1])); return; }
     if (sel === 'copyresult') {
       const d = dec(m[1]);
       r.copies.push(d);
@@ -452,6 +470,8 @@ function makeFakeRunner(fx, opts) {
     }
     throw new Error('fake runner: unexpected message ' + sel);
   }
+  // The host reports what the user did (Play, Stop, a click in the time ruler): events [{seq, kind, posSec}]
+  r.syncEvents = (events) => { r.send('hostStatus', { state: 'transport', jobId: r.job.id, events, mode: 'window', alive: true }); };
   // The host publishes a Live preview: preview-<n>/result.wav (+ result.json), reported by the runner as a `status` message
   // with state "preview". o: {n, frames, resultJson (override), noWav}.
   r.previewN = 0;
@@ -1824,6 +1844,22 @@ test('live preview: the job asks for it; the first preview makes a Preview track
   assert.deepStrictEqual(fx.live.snapshot()[2], fx.initial[1]);
 });
 
+test('live preview: also with a Live that shows new objects late (the sequence re-reads often and long enough)', () => {
+  for (const delayTicks of [1, 2]) {
+    const fx = previewFixture({ live: { delayTicks } });
+    fx.runner.preview();
+    fx.pump();
+    previewClipOk(fx, fx.live.tracks()[1], 1);
+    fx.runner.preview();
+    fx.pump();
+    previewClipOk(fx, fx.live.tracks()[1], 2);
+    fx.runner.finish();
+    fx.pump();
+    assert.ok(/^Done\./.test(fx.status()), fx.status());
+    assert.strictEqual(fx.live.tracks().length, 2, 'the Preview track is gone');
+  }
+});
+
 test('live preview: Apply removes the Preview track first, then places the result (take lane, new track and replace)', () => {
   for (const placement of ['takeLane', 'newTrack', 'replace']) {
     const fx = previewFixture({ placement });
@@ -1979,6 +2015,147 @@ test('live preview: removing the Preview track fails at the end -> the result st
   assert.ok(/Note: .*Preview track could not be removed; delete it by hand/.test(fx.status()), fx.status());
   const lanes = fx.t0.lanes.length;
   assert.strictEqual(lanes, 1, 'the result went to a take lane');
+});
+
+// ---- Transport sync
+// The sync loop polls Live every 40 ms for as long as the job runs, so fx.pump() (which runs until nothing is left to do)
+// cannot be used while it runs: step the clock instead.
+function syncFixture(o) {
+  o = o || {};
+  const fx = makeFixture(o);
+  fx.boot();
+  if (o.sync !== false) fx.sb.settings('sync', 1);
+  fx.sb.sendMelodyne();
+  fx.runner.flush(); fx.live.clock.run(0); fx.runner.flush();   // the launch, `started`, and the loop's first tick
+  fx.launch = fx.runner.launches[0];
+  fx.step = (ms) => { fx.runner.flush(); fx.live.clock.advance(ms); fx.runner.flush(); };
+  fx.song = fx.live.song;
+  return fx;
+}
+
+test('transport sync: the job asks for it, the open line says so, Live\'s position is reported relative to the clip (beats -> seconds)', () => {
+  const fx = syncFixture();
+  assert.strictEqual(fx.launch.job.sync, true);
+  assert.ok(/transport sync: on/.test(fx.statuses().filter((x) => /Melodyne is open/.test(x))[0]), fx.statuses().join(' | '));
+  fx.step(200);
+  const first = fx.runner.transports[0];
+  assert.ok(first, 'a first report');
+  assert.strictEqual(first.jobId, fx.launch.job.id);
+  assert.strictEqual(first.playing, false);
+  near(first.posSec, (0 - 16) * 60 / 120, 1e-9, 'stopped at beat 0; the clip starts at beat 16: -8 s');
+  // Live moves its position while stopped: reported, once per change
+  const n = fx.runner.transports.length;
+  fx.song.timeBase = { t: 18, at: fx.live.clock.now };            // beat 18 = 1 s into the clip at 120 bpm
+  fx.step(100);
+  const moved = fx.runner.transports[fx.runner.transports.length - 1];
+  near(moved.posSec, 1, 1e-9);
+  assert.strictEqual(moved.playing, false);
+  assert.ok(fx.runner.transports.length > n);
+  const count = fx.runner.transports.length;
+  fx.step(300);                                                    // nothing changes: no new report within the heartbeat
+  assert.strictEqual(fx.runner.transports.length, count);
+  fx.step(900);                                                    // ... but at least one per second
+  assert.ok(fx.runner.transports.length > count, 'heartbeat');
+  assert.deepStrictEqual(fx.runner.transports.map((t) => t.seq), fx.runner.transports.map((t, i) => i + 1), 'numbered 1, 2, 3 ...');
+});
+
+test('transport sync: a playing Live is reported about every 100 ms with a growing position; stopping is reported at once', () => {
+  const fx = syncFixture();
+  fx.step(100);
+  fx.song.timeBase = { t: 16, at: fx.live.clock.now }; fx.song.is_playing = 1;       // Live starts playing at the clip start
+  fx.runner.transports.length = 0;
+  fx.step(1000);
+  const reports = fx.runner.transports;
+  assert.ok(reports.length >= 8 && reports.length <= 12, 'about every 100 ms: ' + reports.length);
+  assert.ok(reports.every((t) => t.playing), 'all playing');
+  for (let i = 1; i < reports.length; i++) assert.ok(reports[i].posSec > reports[i - 1].posSec, 'the position grows');
+  near(reports[reports.length - 1].posSec, 1, 0.12, 'about 1 s into the clip after 1 s of playing');
+  fx.song.timeBase = { t: songNow(fx), at: fx.live.clock.now }; fx.song.is_playing = 0;
+  fx.runner.transports.length = 0;
+  fx.step(50);
+  assert.strictEqual(fx.runner.transports[0].playing, false, 'the stop is reported within a poll');
+});
+function songNow(fx) { return fx.song.timeBase.t + (fx.song.is_playing ? (fx.live.clock.now - fx.song.timeBase.at) / 1000 * fx.song.tempo / 60 : 0); }
+
+test('transport sync: the host\'s start, seek and stop are applied to Live; a start Live ignores is corrected once', () => {
+  const fx = syncFixture();
+  fx.step(100);
+  fx.runner.syncEvents([{ seq: 1, kind: 'seek', posSec: 2.5 }]);
+  fx.step(60);
+  near(songNow(fx), 16 + 2.5 * 2, 0.01, 'seek: 2.5 s into the clip = beat 21');
+  assert.strictEqual(fx.song.is_playing, 0, 'a seek does not start Live');
+  fx.runner.syncEvents([{ seq: 2, kind: 'start', posSec: 1 }]);
+  fx.step(60);
+  assert.strictEqual(fx.song.is_playing, 1, 'start: Live plays');
+  near(songNow(fx), 18, 0.2, 'from 1 s into the clip = beat 18 (plus the 60 ms since)');
+  fx.step(400);
+  assert.strictEqual(fx.song.is_playing, 1);
+  fx.runner.syncEvents([{ seq: 3, kind: 'stop', posSec: 3 }]);
+  fx.step(60);
+  assert.strictEqual(fx.song.is_playing, 0, 'stop');
+  const reported = fx.runner.transports[fx.runner.transports.length - 1];
+  assert.strictEqual(reported.playing, false, 'and reported back at once');
+  // a start event before the clip (negative seconds) clamps at beat 0
+  fx.runner.syncEvents([{ seq: 4, kind: 'seek', posSec: -100 }]);
+  fx.step(60);
+  near(songNow(fx), 0, 1e-9);
+  // a Live that starts from somewhere else (its insert marker) is moved to the requested position once
+  const fx2 = syncFixture();
+  fx2.step(100);
+  const realCall = fx2.live.song;
+  fx2.runner.syncEvents([{ seq: 1, kind: 'start', posSec: 2 }]);
+  fx2.step(20);
+  fx2.song.timeBase = { t: 3, at: fx2.live.clock.now };            // Live "started from its marker" at beat 3
+  fx2.step(400);
+  near(songNow(fx2), 16 + 2 * 2 + 0.4 * 2, 0.5, 'corrected to the requested position (plus elapsed time)');
+  assert.ok(fx2.live.calls.filter((c) => c.fn === 'set current_song_time').length >= 2, 'one correction');
+  void realCall;
+  // a start after which Live is not playing is started again
+  const fx3 = syncFixture({ live: { faults: [{ fn: 'continue_playing', nth: 1, mode: 'noop' }] } });
+  fx3.step(100);
+  fx3.runner.syncEvents([{ seq: 1, kind: 'start', posSec: 1 }]);
+  fx3.step(500);
+  assert.strictEqual(fx3.song.is_playing, 1, 'the second try played');
+});
+
+test('transport sync: events for another job, a bad event and events after the job are ignored; the loop ends with the job', () => {
+  const fx = syncFixture();
+  fx.step(100);
+  fx.sb.hostStatus(enc({ state: 'transport', jobId: 'other', events: [{ seq: 1, kind: 'start', posSec: 1 }] }));
+  fx.runner.syncEvents([{ seq: 2, kind: 'jump', posSec: 1 }, { seq: 3, kind: 'start', posSec: 'x' }, null, 5]);
+  fx.step(100);
+  assert.strictEqual(fx.song.is_playing, 0);
+  fx.runner.finish();
+  fx.pump();                                                       // the loop stopped: pump settles again
+  assert.ok(/^Done\./.test(fx.status()), fx.status());
+  assert.strictEqual(fx.live.clock.tasks.size, 0, 'no task is left running');
+  const before = fx.runner.transports.length;
+  fx.live.clock.advance(3000);
+  assert.strictEqual(fx.runner.transports.length, before, 'no reports after the job');
+  fx.sb.hostStatus(enc({ state: 'transport', jobId: fx.launch.job.id, events: [{ seq: 9, kind: 'start', posSec: 1 }] }));
+  assert.strictEqual(fx.song.is_playing, 0, 'an event after the job does not start Live');
+});
+
+test('transport sync: a changed song tempo pauses it with a note; off by default; VocAlign never syncs', () => {
+  const fx = syncFixture();
+  fx.step(100);
+  const n = fx.runner.transports.length;
+  fx.song.tempo = 130;
+  fx.step(300);
+  assert.ok(/^Transport sync is paused: the song tempo changed\.$/.test(fx.status()), fx.status());
+  assert.strictEqual(fx.runner.transports.length, n, 'nothing is reported while the tempo differs');
+  fx.song.tempo = 120;
+  fx.step(100);
+  assert.ok(fx.runner.transports.length > n, 'resumes when the tempo is back');
+  fx.runner.finish();
+  fx.pump();
+
+  const off = syncFixture({ sync: false });
+  assert.strictEqual(off.launch.job.sync, undefined);
+  off.pump(500);
+  assert.strictEqual(off.runner.transports.length, 0);
+  off.runner.finish();
+  off.pump();
 });
 
 test('integration: bridge -> real runner -> real BridgeHost (headless) -> placement on the fake Live model', async () => {

@@ -127,7 +127,7 @@ function readJson(f) { return JSON.parse(fs.readFileSync(f, 'utf8')); }
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test('autostart under a stubbed max-api: six handlers, ping -> pong, nothing written', async () => {
+test('autostart under a stubbed max-api: seven handlers, ping -> pong, nothing written', async () => {
   const handlers = {};
   const calls = [];
   const stub = { addHandler: (n, f) => { handlers[n] = f; }, outlet: (...a) => { calls.push(a); }, post: () => {} };
@@ -145,7 +145,7 @@ test('autostart under a stubbed max-api: six handlers, ping -> pong, nothing wri
     process.listeners('uncaughtException').filter((l) => !before.ue.includes(l)).forEach((l) => process.removeListener('uncaughtException', l));
     process.listeners('unhandledRejection').filter((l) => !before.ur.includes(l)).forEach((l) => process.removeListener('unhandledRejection', l));
   }
-  assert.deepStrictEqual(Object.keys(handlers).sort(), ['cancel', 'copyresult', 'findplugins', 'launch', 'ping', 'status']);
+  assert.deepStrictEqual(Object.keys(handlers).sort(), ['cancel', 'copyresult', 'findplugins', 'launch', 'ping', 'status', 'transport']);
   handlers.ping();
   assert.deepStrictEqual(calls, [['pong']]);
   handlers.status();
@@ -327,6 +327,67 @@ test('live preview: nothing is reported without job.preview, and none after the 
   await sleep(900);
   const n = fx2.all('status').filter((o) => o.data && o.data.state === 'preview').map((o) => o.data.n);
   assert.deepStrictEqual(n, [1], 'preview-1 before the result; preview-2 after it is never reported');
+});
+
+test('transport sync: reports go to the host\'s stdin as lines, the host\'s events come back as one status message', async () => {
+  const host = fakeHost('h-sync.js',
+    // the fake host copies every stdin line into stdin.txt and writes events a little later
+    'const rl = require("readline").createInterface({ input: process.stdin });\n' +
+    'rl.on("line", (l) => fs.appendFileSync(path.join(dir, "stdin.txt"), l + "\\n"));\n' +
+    'setTimeout(() => { fs.appendFileSync(path.join(dir, "sync-events.txt"), "E 1 start 2.500000\\nE 2 seek 4.000000\\n"); }, 400);\n' +
+    // a half line is completed later and must come out whole, and garbage is dropped
+    'setTimeout(() => { fs.appendFileSync(path.join(dir, "sync-events.txt"), "E 3 st"); }, 700);\n' +
+    'setTimeout(() => { fs.appendFileSync(path.join(dir, "sync-events.txt"), "op 5.000000\\nnonsense\\nE 4 jump 1\\n"); }, 1000);\n' +
+    'setTimeout(() => { writeResult(' + OK_RESULT + '); }, 1700);\nsetTimeout(() => process.exit(0), 2200);');
+  const fx = makeFixture();
+  const job = jobFor('melodyne');
+  job.sync = true;
+  fx.launch(job, 'window', host);
+  const st = await fx.started();
+  await fx.ready(st);
+  fx.send('transport', { jobId: job.id, seq: 1, posSec: 1.5, playing: true });
+  fx.send('transport', { jobId: job.id, seq: 2, posSec: -0.25, playing: false });
+  fx.send('transport', { jobId: 'another-job', seq: 3, posSec: 9, playing: true });          // other job: dropped
+  fx.send('transport', { jobId: job.id, seq: 4, posSec: NaN, playing: true });               // not a number: dropped
+  fx.send('transport', { jobId: job.id, seq: -1, posSec: 1, playing: true });                // bad seq: dropped
+  fx.send('transport', 'not json');                                                          // unreadable: dropped
+  await waitFor(() => fs.existsSync(path.join(st.jobDir, 'stdin.txt')) && fs.readFileSync(path.join(st.jobDir, 'stdin.txt'), 'utf8').split('\n').length >= 3, 5000, 'stdin lines');
+  assert.strictEqual(fs.readFileSync(path.join(st.jobDir, 'stdin.txt'), 'utf8'), 'L 1 1.500000 1\nL 2 -0.250000 0\n');
+  const ev = () => fx.all('status').filter((o) => o.data && o.data.state === 'transport');
+  await waitFor(() => ev().length >= 1, 5000, 'first events');
+  assert.deepStrictEqual(ev()[0].data.events, [{ seq: 1, kind: 'start', posSec: 2.5 }, { seq: 2, kind: 'seek', posSec: 4 }]);
+  assert.strictEqual(ev()[0].data.jobId, job.id);
+  await waitFor(() => ev().length >= 2, 5000, 'the completed half line');
+  assert.deepStrictEqual(ev()[1].data.events, [{ seq: 3, kind: 'stop', posSec: 5 }], 'garbage and unknown kinds are dropped');
+  await fx.waitSel('done');
+  await sleep(300);
+  assert.strictEqual(ev().length, 2, 'nothing after the result');
+  // a report after the job ended is dropped without an error
+  fx.send('transport', { jobId: job.id, seq: 9, posSec: 1, playing: true });
+  assert.strictEqual(fx.all('error').length, 0);
+});
+
+test('transport sync: without job.sync (or in headless mode) there is no stdin pipe and no event reading', async () => {
+  const host = fakeHost('h-nosync.js',
+    'fs.writeFileSync(path.join(dir, "stdin-is-pipe.json"), JSON.stringify({ pipe: !fs.fstatSync(0).isFile() && !fs.fstatSync(0).isCharacterDevice() }));\n' +
+    'fs.appendFileSync(path.join(dir, "sync-events.txt"), "E 1 start 2.000000\\n");\n' +
+    'setTimeout(() => { writeResult(' + OK_RESULT + '); }, 500);\nsetTimeout(() => process.exit(0), 900);');
+  const fx = makeFixture();
+  const job = jobFor('melodyne');            // no sync flag
+  fx.launch(job, 'window', host);
+  const st = await fx.started();
+  await fx.ready(st);
+  fx.send('transport', { jobId: job.id, seq: 1, posSec: 1, playing: true });
+  await fx.waitSel('done');
+  assert.deepStrictEqual(readJson(path.join(st.jobDir, 'stdin-is-pipe.json')), { pipe: false });
+  assert.strictEqual(fx.all('status').filter((o) => o.data && o.data.state === 'transport').length, 0);
+  const fx2 = makeFixture();
+  const job2 = jobFor('melodyne');
+  job2.sync = true;
+  fx2.launch(job2, 'headless', host);        // headless: no sync
+  await fx2.started();
+  await fx2.waitSel('done');
+  assert.strictEqual(fx2.all('status').filter((o) => o.data && o.data.state === 'transport').length, 0);
 });
 
 test('headless mode adds --autorender; vocalign job passes through unchanged', async () => {

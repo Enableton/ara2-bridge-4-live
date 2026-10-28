@@ -21,6 +21,7 @@ add_library(bridge_core STATIC
     hostcore/RenderRepair.cpp
     hostcore/KeepRaw.cpp
     hostcore/TransportKey.cpp
+    hostcore/SyncFollow.cpp
     hostcore/Commands.cpp
     hostcore/AudioOutput.cpp
 )
@@ -40,6 +41,7 @@ add_executable(bridge_tests
     tests/test_runguard.cpp
     tests/test_repair.cpp
     tests/test_transportkey.cpp
+    tests/test_syncfollow.cpp
     tests/test_text.mm
     tests/test_commands.cpp
     tests/test_audiooutput.cpp

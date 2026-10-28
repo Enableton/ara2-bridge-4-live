@@ -143,6 +143,29 @@ and `realign` handling as the job's result, `resultPath` pointing into that fold
   previous clip first. The track is removed when the job ends (before the result is placed for Apply; by a cleanup sequence for
   Cancel and failures). The source track is never changed; the user mutes it to compare.
 
+## Transport sync (window mode, Melodyne, `sync: true`)
+
+Live is the master. `job.json` `sync` (optional boolean, default false; Melodyne only, otherwise ignored; a non-boolean is a bad job).
+The host window plays the clip **silently** (the plug-in is called with the advancing position, so its editor shows the cursor as
+in Studio One or any ARA host, but the engine gets silence) and follows the device's reports. The Melodyne audio for listening
+comes from Live: with `preview` on, the Preview track plays the edit in sync with everything else.
+
+- Times are seconds from the start of the rendered clip region (negative before it); the device converts from Live's beats
+  with the song tempo (constant tempo only: the device pauses syncing with a status note while the tempo differs from the job's).
+- **Device -> host, the host's stdin** (window mode with `sync`: the runner spawns the host with a pipe; otherwise stdin is
+  /dev/null): one line per report `L <seq> <posSec> <playing 0|1>\n`. The device polls Live every 40 ms and reports a playing Live
+  about every 100 ms, a stopped one when its position changes, and anything at least once per second. The runner receives them as
+  the `transport` message `{jobId, seq, posSec, playing}` and drops anything else.
+- **Host -> device, `<job>/sync-events.txt`**: one appended line per user action `E <seq> <start|stop|seek> <posSec>\n` (Play/Space/the
+  plug-in's ARA start request, Stop, a click in Melodyne's time ruler). The runner reads new complete lines every 30 ms and sends
+  them as ONE `status {state: "transport", events: [{seq, kind, posSec}], ...}`. The device applies them to Live: `seek` sets
+  `current_song_time`; `start` sets it and calls `continue_playing` (if Live is not playing 250 ms later it is started again; if it
+  is playing somewhere else, `current_song_time` is corrected once); `stop` calls `stop_playing`.
+- The host's decision (hostcore/SyncFollow.h, `decideFollow`): a playing Live inside the region starts the silent playback at the
+  reported position and moves it only when it is more than 80 ms off; outside the region the playback stops; a stopped Live stops it
+  and shows Live's position. While sync is on, Play/Space/the plug-in's start and stop requests never start the local playback, they
+  only send events; a click in the ruler also moves the (stopped) cursor at once. The plug-in's cycle requests are ignored.
+
 ## result.json (host writes; authoritative)
 
 Published atomically and exclusively; never overwritten. Fields: `version`, `id`, `status` (`ok` | `cancelled` | `error`),

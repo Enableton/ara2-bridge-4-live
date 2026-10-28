@@ -9,6 +9,7 @@
 #include "hostcore/AudioOutput.h"
 #include "hostcore/Options.h"
 #include "hostcore/RunGuard.h"
+#include "hostcore/SyncFollow.h"
 #include "hostcore/TransportKey.h"
 
 #include <algorithm>
@@ -23,6 +24,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <fcntl.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -48,7 +51,7 @@ namespace
     constexpr double kPollSeconds { 0.1 };
     constexpr double kCloseAfterApplySeconds { 1.2 };
     constexpr double kPreviewBaselineSeconds { 2.0 };   // after the window opened: when the unedited render is taken
-    constexpr double kPreviewQuietSeconds { 0.4 };      // no edit notification for this long: render the preview
+    constexpr double kPreviewQuietSeconds { 0.2 };      // no edit notification for this long: render the preview
     constexpr int kPreviewKeep { 3 };                   // preview folders kept in the job folder
     constexpr double kOutputCheckSeconds { 0.5 };   // after Play: did the output device call for audio?
     constexpr CGFloat kOutputMenuWidth { 230.0 };
@@ -94,6 +97,12 @@ namespace
         uint64_t previewLastHash { 0 };
         std::chrono::steady_clock::time_point openedAt { std::chrono::steady_clock::now () };
         std::chrono::steady_clock::time_point previewDirtyAt;
+
+        // Transport sync with Live (job.sync, hostcore/SyncFollow.h): the playback runs muted and follows the device's reports
+        bool sync { false };
+        bool syncReported { false };        // a report from the device has arrived
+        long long syncEventSeq { 0 };
+        std::string syncEventsPath;
     };
     State S;
 
@@ -287,6 +296,90 @@ namespace
         return static_cast<int64_t> (std::llround (seconds * rate));
     }
 
+    // Transport sync with Live. Positions to and from the device are seconds from the start of the clip region
+    // (hostcore/SyncFollow.h); the playback timeline starts at Playback::startSample.
+    double syncRate ()
+    {
+        return static_cast<double> (S.context->document->sampleRate (S.context->layout.renderClip));
+    }
+
+    double secondsInRegion (int64_t sample)
+    {
+        return static_cast<double> (sample - S.playback->startSample ()) / syncRate ();
+    }
+
+    int64_t sampleInRegion (double seconds)
+    {
+        return S.playback->startSample () + static_cast<int64_t> (std::llround (seconds * syncRate ()));
+    }
+
+    // what the user did in the window or in the plug-in goes to the device (it applies it to Live): one line appended to
+    // <job>/sync-events.txt, written with a single write() so the runner never reads half a line
+    void emitSyncEvent (const std::string& kind, double posSec)
+    {
+        const std::string line { bridge::formatSyncEvent (++S.syncEventSeq, kind, posSec) };
+        const int fd { ::open (S.syncEventsPath.c_str (), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644) };
+        if (fd < 0)
+        {
+            say ("sync: cannot write " + S.syncEventsPath);
+            return;
+        }
+        if (::write (fd, line.data (), line.size ()) != static_cast<ssize_t> (line.size ()))
+            say ("sync: the event could not be written");
+        ::close (fd);
+    }
+
+    // main thread: a report from the device (Live's position and play state)
+    void applyLiveReport (const bridge::LiveReport& report)
+    {
+        if (! S.sync || S.playback == nullptr || S.phase != Phase::editing || S.stopping)
+            return;
+        if (! S.syncReported)
+        {
+            S.syncReported = true;
+            say ("sync: the device reports Live's transport");
+        }
+        if (! S.playback->started ())
+            return;
+        const bridge::HostPlayState host { S.playback->isPlaying (), secondsInRegion (S.playback->positionSamples ()) };
+        const double regionSec { static_cast<double> (S.playback->endSample () - S.playback->startSample ()) / syncRate () };
+        const auto decision { bridge::decideFollow (report, 0.0, host, regionSec) };
+        char text[120];
+        if (decision.stop)
+        {
+            S.playback->stop ();
+            say (report.playing ? "sync: Live is outside the clip, stopped" : "sync: Live stopped");
+        }
+        if (decision.seek)
+            S.playback->seek (sampleInRegion (decision.seekSec));
+        if (decision.start)
+        {
+            S.playback->play ();
+            std::snprintf (text, sizeof text, "sync: Live plays, following from %.3f s", decision.seekSec);
+            say (text);
+        }
+        else if (decision.seek && host.playing)
+        {
+            std::snprintf (text, sizeof text, "sync: moved %.3f s -> %.3f s", host.posSec, decision.seekSec);
+            say (text);
+        }
+    }
+
+    // the device writes one line per report to our stdin; a closed stdin ends the thread
+    void startSyncReader ()
+    {
+        std::thread ([] {
+            char buffer[256];
+            while (std::fgets (buffer, sizeof buffer, stdin) != nullptr)
+            {
+                bridge::LiveReport report;
+                if (! bridge::parseLiveLine (buffer, report))
+                    continue;
+                dispatch_async (dispatch_get_main_queue (), ^{ applyLiveReport (report); });
+            }
+        }).detach ();
+    }
+
     // test only: besides key presses, ARABRIDGE_TEST_KEYS can carry the plug-in's start/stop requests
     constexpr unsigned short kTestRequestStart { 1001 };
     constexpr unsigned short kTestRequestStop { 1002 };
@@ -460,6 +553,14 @@ namespace
     else
         say ("audio output failed to start: " + S.playback->error () + " (" + S.playback->deviceDescription () + ")");
     [self logOutput];
+    if (context.job.sync && context.job.plugin == "melodyne" && S.playback->started ())
+    {
+        S.sync = true;
+        S.syncEventsPath = context.job.dir + "/sync-events.txt";
+        S.playback->setMuted (true);
+        startSyncReader ();
+        say ("transport sync with Live: on (the playback is silent and follows Live)");
+    }
 
     const NSRect visible { NSScreen.mainScreen.visibleFrame };
     NSRect frame { NSMakeRect (visible.origin.x + 20, visible.origin.y + 20, 1100, 700) };
@@ -615,7 +716,7 @@ namespace
 
     S.deviceListener = std::make_unique<bridge::AudioDeviceListener> ([weakSelf] { [weakSelf audioDevicesChanged]; });
 
-    S.idleText = attachResult == 0 ? "Edit, then press Apply to Live." : "The plug-in editor could not be attached (code " + std::to_string (attachResult) + "). Apply renders the clip unedited.";
+    S.idleText = attachResult == 0 ? (S.sync ? "Edit, then press Apply to Live. The transport follows Live." : "Edit, then press Apply to Live.") : "The plug-in editor could not be attached (code " + std::to_string (attachResult) + "). Apply renders the clip unedited.";
     [self showIdleStatus];
 }
 
@@ -942,6 +1043,13 @@ namespace
 {
     if (S.phase != Phase::editing || S.playback == nullptr || ! S.playback->started () || S.playback->isPlaying ())
         return;
+    if (S.sync)     // Live is the master: ask it, the playback follows its report
+    {
+        const double at { secondsInRegion (S.playback->positionSamples ()) };
+        emitSyncEvent ("start", at);
+        say ("sync: play requested at " + std::to_string (at) + " s");
+        return;
+    }
     S.playback->play ();
     S.wasPlaying = true;
     [self showPlaying: YES];
@@ -953,6 +1061,12 @@ namespace
 {
     if (S.playback == nullptr || ! S.playback->isPlaying ())
         return;
+    if (S.sync)
+    {
+        emitSyncEvent ("stop", secondsInRegion (S.playback->positionSamples ()));
+        say ("sync: stop requested");
+        return;
+    }
     S.playback->stop ();
     [self showPlaying: NO];
 }
@@ -1453,8 +1567,16 @@ namespace
     {
         onMainThread (^(BridgeDelegate*, Clock::time_point) {
             say ("plug-in requests: position " + std::to_string (timePosition) + " s");
-            if (S.playback != nullptr)
-                S.playback->seek (samplesAt (timePosition));
+            if (S.playback == nullptr)
+                return;
+            if (S.sync)
+            {
+                emitSyncEvent ("seek", secondsInRegion (samplesAt (timePosition)));
+                if (! S.playback->isPlaying ())
+                    S.playback->seek (samplesAt (timePosition));      // the cursor answers at once; a playing one follows Live
+                return;
+            }
+            S.playback->seek (samplesAt (timePosition));
         });
     }
 
@@ -1462,6 +1584,11 @@ namespace
     {
         onMainThread (^(BridgeDelegate*, Clock::time_point) {
             say ("plug-in requests: cycle " + std::to_string (startTime) + " s + " + std::to_string (duration) + " s");
+            if (S.sync)
+            {
+                say ("sync: the cycle is not synced with Live (ignored)");
+                return;
+            }
             if (S.playback != nullptr)
                 S.playback->setCycle (samplesAt (startTime), samplesAt (startTime + duration));
         });

@@ -414,6 +414,14 @@ var core = (function () {
             else return badJob('preview must be true or false');
         }
         if (plugin !== 'melodyne') preview = false;
+        // Transport sync (Melodyne only): the host follows Live's transport and reports what the user does back
+        var sync = false;
+        if (spec.sync !== undefined && spec.sync !== null) {
+            if (spec.sync === true || spec.sync === 1) sync = true;
+            else if (spec.sync === false || spec.sync === 0) sync = false;
+            else return badJob('sync must be true or false');
+        }
+        if (plugin !== 'melodyne') sync = false;
 
         var tempo = null;
         if (spec.tempo !== undefined && spec.tempo !== null) {
@@ -474,6 +482,7 @@ var core = (function () {
         var job = { version: 1, id: id, plugin: plugin, createdAt: created, placement: placement, realign: realign, clips: clips };
         if (output !== null) job.output = output;
         if (preview) job.preview = true;
+        if (sync) job.sync = true;
         if (tempo !== null) job.song = { tempo: tempo };
         if (trackIndex !== null) job.live = { trackIndex: trackIndex };
         return { ok: true, job: job };

@@ -41,6 +41,7 @@ struct Playback::Impl
     std::atomic<int64_t> cycleStart { 0 };
     std::atomic<int64_t> cycleEnd { 0 };
     std::atomic<bool> cycling { false };
+    std::atomic<bool> muted { false };
     int restarts { 0 };
     id observer { nil };
     std::atomic<int64_t> callbacks { 0 };
@@ -86,9 +87,13 @@ struct Playback::Impl
             for (UInt32 i = 0; i < list->mNumberBuffers; ++i)
                 buffers[i] = static_cast<float*> (list->mBuffers[i].mData) + done;
             instance->renderSamples (chunk, at, buffers);
-            for (UInt32 i = 0; i < list->mNumberBuffers; ++i)
-                for (int k = 0; k < chunk; ++k)
-                    level = std::max (level, std::fabs (buffers[i][k]));
+            if (muted.load ())
+                for (UInt32 i = 0; i < list->mNumberBuffers; ++i)
+                    std::memset (buffers[i], 0, static_cast<size_t> (chunk) * sizeof (float));
+            else
+                for (UInt32 i = 0; i < list->mNumberBuffers; ++i)
+                    for (int k = 0; k < chunk; ++k)
+                        level = std::max (level, std::fabs (buffers[i][k]));
             at += chunk;
             done += static_cast<AVAudioFrameCount> (chunk);
         }
@@ -324,6 +329,8 @@ void Playback::setCycle (int64_t start, int64_t end)
 }
 
 void Playback::enableCycle (bool enable) { _impl->cycling = enable; }
+void Playback::setMuted (bool muted) { _impl->muted = muted; }
+bool Playback::muted () const { return _impl->muted.load (); }
 int Playback::restarts () const { return _impl->restarts; }
 
 void Playback::simulateConfigurationChangeForTests ()

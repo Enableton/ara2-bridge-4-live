@@ -353,11 +353,15 @@ class AmxdTest(unittest.TestCase):
         self.assertEqual(valueof("obj-t-norealign")["parameter_initial"], [0])      # inverted: 0 = realign ON (bridge default)
         self.assertEqual(valueof("obj-t-norealign")["parameter_longname"], "Skip realign")
         self.assertEqual(valueof("obj-t-norealign")["parameter_shortname"], "NoRealign")
-        self.assertEqual(self.boxes["obj-lnorealign"]["text"], "Skip timing correction")
+        self.assertEqual(self.boxes["obj-lnorealign"]["text"], "Skip timing fix")
         self.assertEqual(valueof("obj-t-preview")["parameter_initial"], [0])        # Live preview is off by default
         self.assertEqual(valueof("obj-t-preview")["parameter_longname"], "Live preview")
         self.assertEqual(valueof("obj-t-preview")["parameter_shortname"], "Preview")
-        self.assertEqual(self.boxes["obj-lpreview"]["text"], "Live preview (Melodyne)")
+        self.assertEqual(self.boxes["obj-lpreview"]["text"], "Preview")
+        self.assertEqual(valueof("obj-t-sync")["parameter_initial"], [0])           # transport sync is off by default
+        self.assertEqual(valueof("obj-t-sync")["parameter_longname"], "Sync transport")
+        self.assertEqual(valueof("obj-t-sync")["parameter_shortname"], "Sync")
+        self.assertEqual(self.boxes["obj-lsync"]["text"], "Sync transport")
         with open(BRIDGE_SRC, "r", encoding="utf-8") as f:
             src = f.read()
         self.assertIn("var PLACEMENTS = ['takeLane', 'newTrack', 'replace'];", src)
@@ -380,7 +384,7 @@ class AmxdTest(unittest.TestCase):
                 shown.append(b["id"])
         non_ui = [b["id"] for b in self.boxes.values() if b["maxclass"] == "newobj" and b.get("presentation") == 1]
         self.assertEqual(non_ui, [])
-        self.assertEqual(len(shown), 13)
+        self.assertEqual(len(shown), 15)
 
     def test_presentation_objects_do_not_overlap(self):
         rects = [(b["id"], b["presentation_rect"]) for b in self.boxes.values() if b.get("presentation") == 1]
@@ -469,6 +473,13 @@ class AmxdTest(unittest.TestCase):
         s.inject("obj-thisdev", 0, ("bang",))
         self.assertNotIn(("settings", "preview", 0), s.js_in)
         self.assertNotIn(("settings", "preview", 1), s.js_in)
+
+    def test_sync_toggle_maps_to_sync(self):
+        for v in (1, 0):
+            s = self.sim()
+            s.inject("obj-t-sync", 0, (v,))
+            self.assertEqual(s.js_in, [("settings", "sync", v)])
+            self.assertEqual(s.node_in, [])
 
     def test_node_outlet0_reaches_host_prepends_with_the_right_selectors(self):
         for sel in PAYLOAD_SELECTORS:

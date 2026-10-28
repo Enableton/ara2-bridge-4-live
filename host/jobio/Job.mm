@@ -236,7 +236,8 @@ namespace bridge
                 || ! readString (root, "placement", "", false, parsed.placement, error)
                 || ! readString (root, "output", "", false, parsed.output, error)
                 || ! readBool (root, "realign", "", parsed.realign, error)
-                || ! readBool (root, "preview", "", parsed.preview, error))
+                || ! readBool (root, "preview", "", parsed.preview, error)
+                || ! readBool (root, "sync", "", parsed.sync, error))
                 return false;
 
             bool ok { true };

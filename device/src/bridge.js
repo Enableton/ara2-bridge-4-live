@@ -106,6 +106,7 @@ var ARABridge = (function (maxThis) {
     var CONFIRM_TRIES = 5;          // re-reads after a mutating call before it counts as "did not take effect"
     var VERIFY_TRIES = 3;           // re-reads of a verify op before it fails
     var MAX_TICKS = 400;            // hard cap per placement sequence
+    var FAST_MS = 40;               // preview and cleanup sequences re-read this often (Live usually answers at once); 6x the tries
     var LAUNCH_ACK_MS = 10000;      // no started/error after launch: the runner is not there
     var CANCEL_WATCH_MS = 15000;    // cancel sent, no done: give the device back
     var COPY_WATCH_MS = 30000;      // copyresult sent, no copied/error: place the job's result.wav
@@ -135,6 +136,7 @@ var ARABridge = (function (maxThis) {
         placement: 'takeLane',
         realign: true,
         preview: false,           // "Live preview" toggle (Melodyne): the next job asks the host for previews
+        sync: false,              // "Sync transport" toggle (Melodyne): the next job follows Live's transport
         pv: null,                 // the preview track and clip in the Live set {trackId, clipId, n}, made by this device
         guide: null,              // {region, clipId, trackId, name}
         job: null,                // the one job of this device (busy while non-null)
@@ -500,7 +502,7 @@ var ARABridge = (function (maxThis) {
         S.job = ctx;
         ctx.id = job.id;
         S.lastSendAt = now();
-        dlog('launch ' + job.id + ' plugin=' + job.plugin + ' placement=' + job.placement + ' realign=' + job.realign + (job.preview ? ' preview=1' : '') +
+        dlog('launch ' + job.id + ' plugin=' + job.plugin + ' placement=' + job.placement + ' realign=' + job.realign + (job.preview ? ' preview=1' : '') + (job.sync ? ' sync=1' : '') +
             (job.output ? ' output=' + job.output : '') +
             ' clip=' + job.clips[job.clips.length - 1].name);
         ctx.phase = 'launching';
@@ -545,7 +547,8 @@ var ARABridge = (function (maxThis) {
         var place = 'placement: ' + (PLACEMENT_WORDS[j.placement] || String(j.placement));
         if (j.plugin === 'melodyne') {
             return 'Melodyne is open (timing correction: ' + (j.realign ? 'on' : 'off') + ', ' + place +
-                (j.preview ? ', live preview: on' : '') + '). Edit, then press Apply in its window. ' +
+                (j.preview ? ', live preview: on' : '') + (j.sync ? ', transport sync: on' : '') + '). Edit, then press Apply in its window. ' +
+                (j.sync ? 'Play, Stop and the position follow Live in both directions. ' : '') +
                 (j.preview ? 'A Preview track appears below this track after each edit; mute this track to compare. ' : '') + NO_SOUND;
         }
         return 'VocAlign is open (' + place + '). Capture guide and dub, align, then press Apply. ' + NO_SOUND;
@@ -561,6 +564,7 @@ var ARABridge = (function (maxThis) {
         stop(copyWatch);
         stop(busyWindowTask);
         stop(busyRetryTask);
+        stop(syncTask);
         S.job = null;
         S.run = null;
         setBusy(false);
@@ -572,11 +576,11 @@ var ARABridge = (function (maxThis) {
         var c = check('melodyne', 'source');
         if (!c.ok) { say(c.reason); return; }
         var r = c.region;
-        var b = C.buildJob({ id: newJobId(), plugin: 'melodyne', placement: S.placement, realign: S.realign, preview: S.preview,
+        var b = C.buildJob({ id: newJobId(), plugin: 'melodyne', placement: S.placement, realign: S.realign, preview: S.preview, sync: S.sync,
             clips: [jobClip('source', r)], tempo: r.tempo, trackIndex: c.sel.trackIndex });
         if (!b.ok) { say('Could not build the job: ' + b.reason); return; }
         launch(b.job, { plugin: 'melodyne', label: 'Melodyne', region: r, clipId: c.sel.clipId, trackId: c.sel.trackId,
-            tempo: r.tempo, placement: b.job.placement, preview: b.job.preview === true });
+            tempo: r.tempo, placement: b.job.placement, preview: b.job.preview === true, sync: b.job.sync === true });
     }
 
     // What a clip is now: null when it is gone; onMainLane false when it is not on its track's main lane.
@@ -775,6 +779,7 @@ var ARABridge = (function (maxThis) {
         stop(busyWindowTask);
         stop(busyRetryTask);
         say(openLine(j));
+        if (j.sync) { j.syncSeq = 0; j.syncSentAt = 0; j.syncLast = null; j.syncVerify = null; later(syncTask, 0); }
     }
 
     function onStatus(d) {
@@ -782,6 +787,7 @@ var ARABridge = (function (maxThis) {
         var j = S.job;
         if (!j || j.phase === 'placing' || j.phase === 'copying') return;
         if (d.state === 'preview') { onPreview(d); return; }
+        if (d.state === 'transport') { onSyncEvents(d); return; }
         if (d.state === 'cancelling') say('Cancelling...');
         else if (d.state === 'backstop') say('The host took too long and is being stopped.');
         // state idle with a job of ours: a done may still follow (the host exited, the grace wait runs); the cancel
@@ -988,6 +994,91 @@ var ARABridge = (function (maxThis) {
         later(seqTask, 0);
     }
 
+    // ------------------------------------------------------------------------------------------ transport sync
+    // Live is the master. While a sync job runs (the host window is open) this device reports Live's play state and
+    // position to the host (through the runner) and applies what the host reports back (Play, Stop or a click in
+    // Melodyne's time ruler) to Live. Positions are seconds from the start of the clip region (hostcore/SyncFollow.h).
+    // Live's own Song.current_song_time / is_playing are polled every SYNC_MS (the Live API is not sample accurate: the host
+    // follows with a silent playback, it does not need more); a playing Live is reported every SYNC_PLAY_MS so that the
+    // host can correct drift, a stopped one when its position changes, and everything at least once a second.
+    var SYNC_MS = (typeof ARABRIDGE_SYNC_MS !== 'undefined') ? ARABRIDGE_SYNC_MS : 40;
+    var SYNC_PLAY_MS = 100;
+    var SYNC_HEARTBEAT_MS = 1000;
+    var SYNC_VERIFY_MS = 250;
+    var syncTask = newTask(function () {
+        try { syncTick(); } catch (e) { log('sync: ' + errText(e)); }
+    });
+
+    function syncTick() {
+        var j = S.job;
+        if (S.dead || !j || !j.sync || j.phase !== 'running') return;   // the loop ends with the job
+        var song = newApi('live_set');
+        var tempo = getNum(song, 'tempo');
+        var playing = getNum(song, 'is_playing');
+        var t = getNum(song, 'current_song_time');
+        if (tempo !== null && Math.abs(tempo - j.tempo) > 1e-6) {
+            if (!j.syncTempoNoted) { j.syncTempoNoted = true; j.syncLast = null; say('Transport sync is paused: the song tempo changed.'); }
+        } else if (playing !== null && t !== null) {
+            j.syncTempoNoted = false;
+            var pos = (t - j.region.startBeats) * 60 / j.tempo;
+            var isPlaying = playing === 1;
+            var at = now();
+            var last = j.syncLast;
+            var due = !last || last.playing !== isPlaying || at - j.syncSentAt >= SYNC_HEARTBEAT_MS ||
+                (isPlaying ? at - j.syncSentAt >= SYNC_PLAY_MS : abs(last.pos - pos) > 0.0005);
+            if (due) {
+                j.syncLast = { playing: isPlaying, pos: pos };
+                j.syncSentAt = at;
+                toRunner('transport', { jobId: j.id, seq: ++j.syncSeq, posSec: pos, playing: isPlaying });
+            }
+            checkSyncStart(j, song, isPlaying, t, at);
+        }
+        later(syncTask, SYNC_MS);
+    }
+    function abs(x) { return x < 0 ? -x : x; }
+
+    // After a start requested by the host: Live has to be playing at about the requested position. Live's own start
+    // semantics (play from the insert marker or from where it stopped) are not assumed: what is wrong is corrected once.
+    function checkSyncStart(j, song, isPlaying, t, at) {
+        var v = j.syncVerify;
+        if (!v || at < v.at) return;
+        j.syncVerify = null;
+        var wantBeats = v.beats + (at - v.started) / 1000 * j.tempo / 60;
+        if (!isPlaying) { callN(song, 'continue_playing', []); log('sync: Live was not playing after the start request; started again'); return; }
+        if (abs(t - wantBeats) > 0.25 * j.tempo / 60) {
+            setProp(song, 'current_song_time', wantBeats);
+            log('sync: moved Live to the requested position (it was at ' + fmt(t) + ' beats, wanted ' + fmt(wantBeats) + ')');
+        }
+    }
+
+    function onSyncEvents(d) {
+        var j = S.job;
+        if (!j || !j.sync || j.phase !== 'running' || d.jobId !== j.id || !isArr(d.events)) return;
+        for (var i = 0; i < d.events.length; i++) {
+            var e = d.events[i];
+            if (isObj(e) && typeof e.posSec === 'number' && isFinite(e.posSec)) applySyncEvent(j, e);
+        }
+    }
+
+    function applySyncEvent(j, e) {
+        var song = newApi('live_set');
+        var beats = j.region.startBeats + e.posSec * j.tempo / 60;
+        if (beats < 0) beats = 0;
+        if (e.kind === 'stop') {
+            callN(song, 'stop_playing', []);
+        } else if (e.kind === 'seek') {
+            setProp(song, 'current_song_time', beats);
+        } else if (e.kind === 'start') {
+            setProp(song, 'current_song_time', beats);
+            callN(song, 'continue_playing', []);
+            j.syncVerify = { beats: beats, started: now(), at: now() + SYNC_VERIFY_MS };
+        } else {
+            return;
+        }
+        j.syncSentAt = 0;           // report Live's new state at once
+        dlog('sync event ' + e.kind + ' at ' + fmt(e.posSec) + ' s -> ' + fmt(beats) + ' beats');
+    }
+
     // ------------------------------------------------------------------------------------------ live preview
     // The host renders again after every edit and publishes preview-<n>/ in the job folder; the runner reports each as a
     // `status` message with state "preview". Each one goes onto a Preview track made by this device, right below the
@@ -1146,6 +1237,7 @@ var ARABridge = (function (maxThis) {
         if (!run) return;
         try {
             if (++run.ticks > MAX_TICKS) { abortRun(run, 'the placement did not finish (internal step limit)'); return; }
+            var gap = (run.preview || run.cleanup) ? FAST_MS : SETTLE_MS;
             if (run.pending) {
                 var p = run.pending;
                 p.tries++;
@@ -1154,7 +1246,7 @@ var ARABridge = (function (maxThis) {
                 // exist; keep re-reading (failing here would forget an object that rollback must remove).
                 try { r = p.confirm(); } catch (ce) { log('re-read failed: ' + errText(ce)); r = null; }
                 if (r === null) {
-                    if (p.tries < p.maxTries) { later(seqTask, SETTLE_MS); return; }
+                    if (p.tries < p.maxTries) { later(seqTask, gap); return; }
                     try { r = p.exhausted(); } catch (xe) { r = { fail: 'internal error: ' + errText(xe), sourceGone: null }; }
                 }
                 run.pending = null;
@@ -1168,8 +1260,8 @@ var ARABridge = (function (maxThis) {
             var out = beginOp(run, op);
             if (out.pending) {
                 run.pending = { op: op, confirm: out.pending.confirm, exhausted: out.pending.exhausted,
-                    maxTries: out.pending.maxTries || CONFIRM_TRIES, tries: 0 };
-                later(seqTask, SETTLE_MS);
+                    maxTries: (out.pending.maxTries || CONFIRM_TRIES) * (gap === FAST_MS ? 6 : 1), tries: 0 };
+                later(seqTask, gap);
                 return;
             }
             opDone(run, op, out);
@@ -1598,6 +1690,12 @@ var ARABridge = (function (maxThis) {
         S.realign = n === 1;
         log('realign (timing correction) is now ' + (S.realign ? 'on' : 'off'));
     }
+    function setSync(v) {
+        var n = num(v);
+        if (n !== 0 && n !== 1) { say('sync must be 0 or 1.'); return; }
+        S.sync = n === 1;
+        log('transport sync is now ' + (S.sync ? 'on' : 'off'));
+    }
     function setPreview(v) {
         var n = num(v);
         if (n !== 0 && n !== 1) { say('preview must be 0 or 1.'); return; }
@@ -1605,11 +1703,12 @@ var ARABridge = (function (maxThis) {
         log('live preview is now ' + (S.preview ? 'on' : 'off'));
     }
     function settings(args) {
-        if (args.length % 2 !== 0) { say('settings needs key/value pairs (placement ..., realign ..., preview ...).'); return; }
+        if (args.length % 2 !== 0) { say('settings needs key/value pairs (placement ..., realign ..., preview ..., sync ...).'); return; }
         for (var i = 0; i < args.length; i += 2) {
             if (args[i] === 'placement') setPlacement(args[i + 1]);
             else if (args[i] === 'realign') setRealign(args[i + 1]);
             else if (args[i] === 'preview') setPreview(args[i + 1]);
+            else if (args[i] === 'sync') setSync(args[i + 1]);
             else say('Unknown setting "' + String(args[i]) + '".');
         }
     }
@@ -1674,7 +1773,7 @@ var ARABridge = (function (maxThis) {
     function deleted() {
         dlog('notifydeleted' + (S.job ? ' during ' + S.job.phase : ''));
         S.dead = true;
-        var tasks = [launchWatch, cancelWatch, copyWatch, helloTask, seqTask, busyWindowTask, busyRetryTask];
+        var tasks = [launchWatch, cancelWatch, copyWatch, helloTask, seqTask, busyWindowTask, busyRetryTask, syncTask];
         for (var i = 0; i < tasks.length; i++) stop(tasks[i]);
         var j = S.job;
         if (j && j.phase === 'placing' && j.placement === 'replace') {

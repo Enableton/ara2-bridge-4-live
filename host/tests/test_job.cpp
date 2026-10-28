@@ -161,6 +161,11 @@ TEST (job_tolerates_unknown_keys_and_null_optionals)
     CHECK (! job.preview);
     CHECK (loads ("jp3", melodyneJob (R"("preview": null, )", ""), job, error));
     CHECK (! job.preview);
+    CHECK (! job.sync);
+    CHECK (loads ("js1", melodyneJob (R"("sync": true, )", ""), job, error));
+    CHECK (job.sync);
+    CHECK (loads ("js2", melodyneJob (R"("sync": null, )", ""), job, error));
+    CHECK (! job.sync);
 
     // The song object without a tempo keeps the default.
     CHECK (loads ("jn2", melodyneJob (R"("song": {}, )", ""), job, error));
@@ -252,6 +257,7 @@ TEST (job_rejects_wrong_types)
     CHECK (rejects ("t6", melodyneJob (R"("realign": 1, )", ""), "'realign' must be true or false"));
     CHECK (rejects ("t7", melodyneJob (R"("realign": "yes", )", ""), "'realign' must be true or false"));
     CHECK (rejects ("t7b", melodyneJob (R"("preview": 1, )", ""), "'preview' must be true or false"));
+    CHECK (rejects ("t7c", melodyneJob (R"("sync": "yes", )", ""), "'sync' must be true or false"));
     CHECK (rejects ("t8", melodyneJob (R"("song": [120], )", ""), "'song' must be an object"));
     CHECK (rejects ("t9", melodyneJob (R"("song": {"tempo": "fast"}, )", ""), "'song.tempo' must be a number"));
     CHECK (rejects ("t10", R"({"version": 1, "id": "x", "plugin": "melodyne", "clips": {"role": "source"}})", "'clips' must be an array"));

@@ -53,6 +53,11 @@ public:
     int64_t startSample () const;
     int64_t endSample () const;
 
+    // Silent playback: the plug-in is still called with the advancing playback position (its editor shows the cursor and
+    // the clip as it plays) but the engine receives silence. Used while the host follows Live's transport.
+    void setMuted (bool muted);
+    bool muted () const;
+
     // Moves the play position (clamped to the region), also while playing.
     void seek (int64_t sample);
 

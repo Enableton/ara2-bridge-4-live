@@ -29,6 +29,9 @@ namespace bridge
         // each state as preview-<n>/result.wav + result.json (hostcore/ApplyJob.h, writePreview); the device plays
         // it as a clip in Live. Absent = false.
         bool preview { false };
+        // window mode, melodyne only: the host follows Live's transport and reports what the user does in its window
+        // or in the plug-in back (hostcore/SyncFollow.h). Absent = false.
+        bool sync { false };
         // where result.wav starts: "dub" (default) = at the rendered clip's region (the dub for vocalign, the
         // source for melodyne); "guide" (vocalign only) = at the guide clip's arrangement position, the aligned dub
         // placed inside a window of digital silence (hostcore/JobLayout.h, GuideWindow)

@@ -178,10 +178,13 @@ def build_patch():
 
     # ---- presentation: skip-realign toggle, status
     p.live_toggle("obj-t-norealign", "Skip realign", "NoRealign", [4.0, 83.0, 14.0, 14.0], [20.0, 130.0], 0)
-    p.comment("obj-lnorealign", "Skip timing correction", [22.0, 81.0, 130.0, 16.0], [60.0, 130.0])
+    p.comment("obj-lnorealign", "Skip timing fix", [20.0, 81.0, 86.0, 16.0], [60.0, 130.0])
     # Live preview (Melodyne): after every edit in the host window the result is placed on a Preview track
-    p.live_toggle("obj-t-preview", "Live preview", "Preview", [168.0, 83.0, 14.0, 14.0], [240.0, 130.0], 0)
-    p.comment("obj-lpreview", "Live preview (Melodyne)", [186.0, 81.0, 140.0, 16.0], [280.0, 130.0])
+    p.live_toggle("obj-t-preview", "Live preview", "Preview", [108.0, 83.0, 14.0, 14.0], [240.0, 130.0], 0)
+    p.comment("obj-lpreview", "Preview", [124.0, 81.0, 64.0, 16.0], [280.0, 130.0])
+    # Sync transport (Melodyne): the host window follows Live's Play/Stop/position and the other way round
+    p.live_toggle("obj-t-sync", "Sync transport", "Sync", [194.0, 83.0, 14.0, 14.0], [380.0, 130.0], 0)
+    p.comment("obj-lsync", "Sync transport", [210.0, 81.0, 116.0, 16.0], [420.0, 130.0])
     p.comment("obj-status", "Starting...", [4.0, 121.0, 322.0, 46.0], [20.0, 170.0], linecount=4)
 
     # ---- startup: live.thisdevice -> deferlow -> [t b b]; right to left: Placement menu bang, then `ready` to js.
@@ -234,6 +237,11 @@ def build_patch():
     p.newobj("obj-pre-preview", "prepend settings preview", [440.0, 450.0, 160.0, 22.0])
     p.connect("obj-t-preview", 0, "obj-pre-preview", 0)
     p.connect("obj-pre-preview", 0, "obj-js", 0)
+
+    # Sync transport toggle (default 0 = off): js gets sync = toggle
+    p.newobj("obj-pre-sync", "prepend settings sync", [440.0, 480.0, 160.0, 22.0])
+    p.connect("obj-t-sync", 0, "obj-pre-sync", 0)
+    p.connect("obj-pre-sync", 0, "obj-js", 0)
 
     # ---- node.script outlet 0 -> route -> prepend host* -> js
     selectors = ["started", "done", "status", "error", "plugins", "copied", "pong"]
