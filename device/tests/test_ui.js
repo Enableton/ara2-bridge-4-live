@@ -55,7 +55,7 @@ const DRIVER = `
 
   // each button: one message of its own
   R.actions = {};
-  ["sendMelodyne", "setGuide", "sendVocAlign", "cancel"].forEach(function (a) { click($('[data-action="' + a + '"]')); R.actions[a] = take(); });
+  ["sendMelodyne", "setGuide", "sendVocAlign", "cancel", "installHost"].forEach(function (a) { click($('[data-action="' + a + '"]')); R.actions[a] = take(); });
   click($("#refresh")); R.actions.refreshPlugins = take();
 
   // switches: toggle on, then off
@@ -75,6 +75,13 @@ const DRIVER = `
 
   // inbound from Max: the page changes, nothing goes back out
   var H = window.__handlers;
+  R.install = {};
+  ["none", "missing", "update", "ok"].forEach(function (st) {
+    H.ui_state("hostinstall", st);
+    R.install[st] = { text: $("#installHost").textContent, shown: getComputedStyle($("#installHost")).display !== "none", sent: take() };
+  });
+  $("#aboutBtn").click(); R.aboutOpen = getComputedStyle($("#about")).display !== "none"; R.aboutVer = $("#aboutVer").textContent;
+  $("#about").click(); R.aboutClosed = getComputedStyle($("#about")).display === "none";
   H.ui_state("setting", "placement", 1); H.ui_state("setting", "skip", 1); H.ui_state("setting", "preview", 0); H.ui_state("setting", "sync", 1);
   H.ui_state("busy", 1); H.ui_state("cancel", 1); H.ui_state("guide", 1); H.ui_state("host", 1); H.ui_state("plugins", 1, 0);
   H.ui_status("Placing the result...");
@@ -125,7 +132,7 @@ if (!chrome) {
     test('page: every action button sends exactly its own message', () => {
       assert.deepStrictEqual(R.actions, {
         sendMelodyne: [['ui_action', 'sendMelodyne']], setGuide: [['ui_action', 'setGuide']], sendVocAlign: [['ui_action', 'sendVocAlign']],
-        cancel: [['ui_action', 'cancel']], refreshPlugins: [['ui_action', 'refreshPlugins']] });
+        cancel: [['ui_action', 'cancel']], installHost: [['ui_action', 'installHost']], refreshPlugins: [['ui_action', 'refreshPlugins']] });
     });
     test('page: each switch sends ui_set <name> 1, then 0', () => {
       ['skip', 'preview', 'sync'].forEach((k) => {
@@ -151,6 +158,16 @@ if (!chrome) {
       assert.deepStrictEqual(R.after.chips.map((s) => s.replace(/\s+/g, ' ').trim()), ['Melodyne no host', 'VocAlign no host']);
       assert.strictEqual(R.after.guide, 'no guide');
       assert.strictEqual(R.joined, 'a b');
+    });
+    test('page: the Install host / Update host button only shows for the states missing and update, and never echoes', () => {
+      assert.deepStrictEqual(Object.keys(R.install).map((k) => [k, R.install[k].shown]), [['none', false], ['missing', true], ['update', true], ['ok', false]]);
+      assert.strictEqual(R.install.missing.text, 'Install host');
+      assert.strictEqual(R.install.update.text, 'Update host');
+      Object.keys(R.install).forEach((k) => assert.deepStrictEqual(R.install[k].sent, [], k));
+    });
+    test('page: About opens, shows the version of the header, and closes on a click', () => {
+      assert.ok(R.aboutOpen && R.aboutClosed);
+      assert.ok(/^v\d+\.\d+\.\d+$/.test(R.aboutVer), R.aboutVer);
     });
     test('page: fills the whole jweb rectangle, nothing overflows it', () => {
       assert.deepStrictEqual(R.size, R.inner);

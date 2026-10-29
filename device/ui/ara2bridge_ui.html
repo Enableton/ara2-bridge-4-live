@@ -9,12 +9,13 @@
 
   The page holds NO saved state: placement and the three switches live in the device's live.menu / live.toggle objects
   (saved with the Live set), the page only mirrors them. Every control sends ONE message of its own to Max:
-      ui_action <sendMelodyne|setGuide|sendVocAlign|cancel|refreshPlugins>
+      ui_action <sendMelodyne|setGuide|sendVocAlign|cancel|refreshPlugins|installHost>
       ui_set <placement 0-2 | skip 0-1 | preview 0-1 | sync 0-1>
       ui_loaded                                  (once, after the handlers below are registered)
   and receives (inlet names are prefixed; a value coming from Max is applied silently and never sent back):
       ui_status <text>                           the device's status line
       ui_state busy <0|1> | cancel <0|1> | host <0|1> | plugins <melodyne> <vocalign> | guide <0|1>
+               | hostinstall <none|missing|update|ok>   (a single-file device carries BridgeHost: missing/update show the button)
                | setting <placement|skip|preview|sync> <value>
   Without window.max (a normal browser) the page runs in a demo mode that answers itself, for previews.
 -->
@@ -85,6 +86,22 @@
   .ghost svg { width: 11px; height: 11px; }
   .ghost.spin svg { animation: rot .8s linear infinite; }
   @keyframes rot { to { transform: rotate(360deg); } }
+
+  .ghost.install { display: none; height: 20px; padding: 0 10px; font: 600 11px var(--sans); color: #1a1208; background: var(--live); border-color: var(--live); }
+  .ghost.install:hover { background: #ffbc78; border-color: #ffbc78; }
+  .device.install-missing .ghost.install, .device.install-update .ghost.install { display: inline-flex; }
+  .device.install-update .ghost.install { color: var(--live); background: rgba(255,173,86,.14); border-color: var(--live); }
+  .device.install-update .ghost.install:hover { background: rgba(255,173,86,.28); }
+  .about-btn { width: 20px; padding: 0; justify-content: center; font: 600 11px var(--sans); }
+  .about {
+    position: absolute; left: 10px; right: 10px; top: 34px; bottom: 36px; z-index: 30; display: none;
+    background: #16171a; border: 1px solid var(--line); border-radius: 5px; padding: 9px 12px;
+    font: 11px/15px var(--sans); color: var(--dim); overflow: hidden;
+  }
+  .device.show-about .about { display: block; }
+  .about b { color: var(--text); font-weight: 600; }
+  .about code { font: 10.5px var(--mono); color: var(--text); }
+  .about .x { position: absolute; top: 6px; right: 8px; font: 10px var(--mono); color: var(--faint); }
 
   /* main row ---------------------------------------------------------- */
   main { display: grid; grid-template-columns: 1.35fr 1fr 1.25fr; gap: 6px; min-height: 0; }
@@ -216,14 +233,16 @@
   <header>
     <div class="brand">
       <h1>ARA2 Bridge <em>4 Live</em></h1>
-      <span>v0.2.1</span>
+      <span>v0.3.0</span>
     </div>
+    <button class="ghost install" id="installHost" type="button" data-action="installHost">Install host</button>
     <span class="chip" id="chipMel"><i></i>Melodyne <b>checking</b></span>
     <span class="chip" id="chipVoc"><i></i>VocAlign <b>checking</b></span>
     <button class="ghost" id="refresh" type="button">
       <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.2 6a4.2 4.2 0 1 1-1.3-3"/><path d="M9.4 1v2.4H7"/></svg>
       Refresh plug-ins
     </button>
+    <button class="ghost about-btn" id="aboutBtn" type="button" aria-label="About">i</button>
   </header>
 
   <main>
@@ -274,6 +293,14 @@
       </div>
     </section>
   </main>
+
+  <div class="about" id="about">
+    <span class="x">click to close</span>
+    <b>ARA2 Bridge 4 Live</b> <span id="aboutVer"></span> &middot; free software under the GNU GPL v3 or later, no warranty.<br>
+    Source code of this device and of BridgeHost: <code>github.com/Enableton/ara2-bridge-4-live</code> (release and commit in <code>SOURCE.txt</code>).<br>
+    Built on the Celemony ARA SDK (Apache 2.0), the Steinberg VST3 SDK (GPL v3) and others: see <code>THIRD_PARTY_NOTICES.md</code> and <code>licenses/</code> in this device's project folder.<br>
+    Needs your own licensed Melodyne and/or VocAlign. Independent project, not affiliated with Ableton, Celemony or Synchro Arts.
+  </div>
 
   <footer>
     <div class="sweep"></div>
@@ -366,6 +393,10 @@
   Array.prototype.forEach.call(document.querySelectorAll("[data-action]"), function (b) {
     b.addEventListener("click", function () { send("ui_action", b.getAttribute("data-action")); });
   });
+  $("#aboutVer").textContent = $(".brand span").textContent;
+  $("#aboutBtn").addEventListener("click", function (e) { e.stopPropagation(); device.classList.toggle("show-about"); });
+  $("#about").addEventListener("click", function () { device.classList.remove("show-about"); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") device.classList.remove("show-about"); });
   $("#refresh").addEventListener("click", function () {
     send("ui_action", "refreshPlugins");
     startScan();
@@ -408,6 +439,11 @@
       $("#stepGuide").classList.toggle("done", +a === 1);
       $("#guideState").textContent = +a === 1 ? "guide set ✓" : "no guide";
     }
+    else if (kind === "hostinstall") {
+      device.classList.toggle("install-missing", a === "missing");
+      device.classList.toggle("install-update", a === "update");
+      $("#installHost").textContent = a === "update" ? "Update host" : "Install host";
+    }
     else if (kind === "setting") applySetting(a, b);
   }
   function flat(args) {
@@ -424,6 +460,7 @@
     else if (args[0] === "ui_action") {
       var act = args[1];
       if (act === "refreshPlugins") { setTimeout(function () { onState("plugins", 1, 1); onStatus("Ready. Melodyne: found. VocAlign: found."); }, 900); }
+      else if (act === "installHost") { setTimeout(function () { onState("hostinstall", "ok"); onStatus("BridgeHost installed. Checking the plug-ins..."); }, 700); }
       else if (act === "cancel") { clearTimeout(demoTimer); onState("busy", 0); onState("cancel", 0); onStatus("Cancelling..."); }
       else if (act === "setGuide") { onState("guide", 1); onStatus("Guide set: Lead vocal (Vox). Now select the dub clip and press Send to VocAlign."); }
       else {

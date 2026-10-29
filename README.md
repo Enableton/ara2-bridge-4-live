@@ -15,7 +15,7 @@ A Max for Live device sends the selected audio clip from Live's **Arrangement Vi
 press **Apply**, the host renders the result offline and the device puts it back into the Arrangement as a take lane, a
 new track, or in place of the original clip.
 
-> **Status: experimental, v0.2.1.** Verified by the author with Live 12.4.6, Melodyne 5 and VocAlign 6 Pro on Apple
+> **Status: experimental, v0.3.0.** Verified by the author with Live 12.4.6, Melodyne 5 and VocAlign 6 Pro on Apple
 > Silicon. Other versions and machines are untested. Read "Known limits" before you rely on it.
 
 ## What it does
@@ -85,6 +85,10 @@ python3 device/make_amxd.py
 This writes `device/ARABridge.amxd`. The device refers to its scripts by **absolute path inside this checkout**
 (`device/build/bridge.js`, `device/src/runner.js` and the interface `device/ui/ara2bridge_ui.html`), so keep the folder where it is, and re-run the command if you move
 it or after pulling new changes. The path must not contain spaces.
+
+**Single file instead:** `python3 device/make_amxd.py --single --host <path to BridgeHost>` writes one `.amxd` that carries the host and
+everything else (see `device/README.md`, "Single-file device"). Release builds ship it as `ARABridge.amxd`; the device then has an
+**Install host** button and needs no `install.sh`.
 
 ### 5. Use it in Live
 

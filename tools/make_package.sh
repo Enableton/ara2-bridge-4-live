@@ -50,7 +50,14 @@ cp "$HOST" "$PKG/BridgeHost"
 cp dist/README.md dist/README.en.md dist/LICENSES.md dist/install.sh dist/uninstall.sh "$PKG/"
 chmod 755 "$PKG/BridgeHost" "$PKG/install.sh" "$PKG/uninstall.sh"
 
+# the single-file device: scripts, page, licences and this BridgeHost frozen into ONE .amxd (no install.sh needed)
+python3 device/make_amxd.py --single --host "$HOST" "$OUT/ARABridge.amxd" >/dev/null
+if grep -aq "/Users/" "$OUT/ARABridge.amxd"; then echo "make_package: note: /Users/ occurs in ARABridge.amxd (placeholders in the licence texts are fine)"; fi
+if grep -aq "$ROOT" "$OUT/ARABridge.amxd"; then die "ARABridge.amxd contains the path of this checkout"; fi
+
 echo "5/5 zip"
 ( cd "$OUT" && rm -f "$NAME.zip" && ditto -c -k --keepParent "$NAME" "$NAME.zip" )
 echo "$OUT/$NAME.zip"
 shasum -a 256 "$OUT/$NAME.zip"
+echo "$OUT/ARABridge.amxd (single file)"
+shasum -a 256 "$OUT/ARABridge.amxd"

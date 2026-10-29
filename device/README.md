@@ -28,6 +28,27 @@ old folder: run `python3 device/make_amxd.py` there first.
 | `ARABridge.amxd` | The Max for Live Audio Effect (audio passes through unchanged). |
 | `tests/test_amxd_container.py` | `python3 -I device/tests/test_amxd_container.py`: parses the `.amxd` bytes independently of the builder, checks ports, parameters, presentation rectangles, simulates the message flow of every button/setting/node message, and fails if the committed `.amxd` differs from a fresh build. In a checkout at another path than the one the committed `.amxd` was built for, the two path-dependent tests (committed file current, scripts exist) are skipped with `rebuild with python3 device/make_amxd.py`; after rebuilding there they run strictly. |
 
+## Single-file device
+
+`python3 device/make_amxd.py --single --host /path/to/BridgeHost [out.amxd]` writes ONE `.amxd` (default
+`device/ARABridge-single.amxd`, git-ignored) that carries `bridge.js`, `runner.js`, the page, the licence texts, a
+`SOURCE.txt` (repository, commit, sha256 of the host) and the `BridgeHost` binary. Like a device frozen by Max it holds the
+patcher plus one zip folder `web_assets`; Max unpacks it on load into `~/Documents/Max 9/Max for Live Devices/<file name>
+Project/web_assets`, which is on the search path of the device, so the patch refers to plain names (`js bridge.js`,
+`node.script runner.js`, `readfile ara2bridge_ui.html`). The zip keeps Unix modes (the host stays executable). `tools/make_package.sh`
+builds it with the packaged host next to the ZIP.
+
+The host is NOT run from the unpacked folder: the page shows **Install host** (state `missing`) or **Update host** (state
+`update`, the embedded host differs from `~/Library/Application Support/ARABridge/bin/BridgeHost`); a click sends
+`ui_action installHost` -> js `installHost` -> runner `installhost`, which copies the embedded host to `bin/` (atomic: `.part`,
+chmod 755, quarantine flag cleared, byte check, rename) and answers `hostinfo`; then the plug-in check runs again. Nothing is
+installed without that click. A device built without `--single` has no embedded host (`hostinfo` state `none`) and keeps the
+old hint (`tools/install_host.sh`). The page's **i** button shows the licence and source information.
+
+Container notes: every file name in the `dlst` directory is NUL-terminated and padded to a multiple of 4 (always at least one
+NUL, also when the length already is a multiple of 4, otherwise Max writes an empty folder); `tests/test_amxd_container.py`
+(`SingleFileTest`) parses the container independently. Only tried so far in Max, not yet in Live on another Mac.
+
 ## Install and load
 
 1. Build the host once: `tools/build_host.sh`, then **`tools/install_host.sh`** (you run this; it copies BridgeHost to

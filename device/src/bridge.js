@@ -33,6 +33,11 @@
 //                                      reached placement is given up (the device becomes idle), liveness is re-checked
 //   ready                              from live.thisdevice (through deferlow): LiveAPI is usable now
 //   refreshPlugins                     ask the runner for BridgeHost --find-plugins again
+//   installHost                        from the page's Install host / Update host button (single-file device only):
+//                                      the runner copies the embedded BridgeHost to <ARABridge>/bin (refused while busy)
+//   hostInfo <payload>                 the runner's answer to `hostinfo`: {embedded, installed, state none|missing|
+//                                      update|ok}. missing/update make the page show the install button; after an
+//                                      install (state ok) the plug-in check runs again
 //   uiRefresh                          from the HTML page (jweb) once it has loaded and bound its handlers: re-emits the
 //                                      last status line (outlet 0) and the whole UI state (outlet 2: setting ... busy
 //                                      cancel host plugins guide). Needed because Live restores the settings and js says
@@ -47,7 +52,8 @@
 //   1  to node.script: launch <urlencoded {job, mode}> | cancel | findplugins | status
 //                      | copyresult <urlencoded {jobId, from, to}>
 //   2  UI state: busy <0|1> | cancel <0|1> (a job can be cancelled) | plugins <melodyne 0|1> <vocalign 0|1>
-//      | host <0|1> | guide <0|1> | setting <placement 0-2|skip|preview|sync> <value> (only on uiRefresh).
+//      | host <0|1> | guide <0|1> | hostinstall <none|missing|update|ok> | setting <placement 0-2|skip|preview|sync> <value>
+//      (only on uiRefresh).
 //      Goes to the HTML page ONLY, never to a live.* object (greying live.* objects made a button fire by itself);
 //      busy changes are logged in device.log ('ui busy 0|1').
 //
@@ -137,6 +143,7 @@ var ARABridge = (function (maxThis) {
         runnerAlive: false,       // any host* message arrived (the runner answered)
         helloTries: 0,
         hostMissing: null,        // true after an error no-host, false after a plugins reply
+        hostInstall: null,        // the runner's hostinfo state: none | missing | update | ok (null = not asked yet)
         plugins: { melodyne: null, vocalign: null },   // true/false from --find-plugins, null = unknown
         placement: 'takeLane',
         realign: true,
@@ -451,6 +458,9 @@ var ARABridge = (function (maxThis) {
         var v = C.validateClip(sel.clip, sel.track, { tempo: sel.tempo }, opts);
         if (!v.ok) {
             if (v.code === 'no-host' || v.code === 'no-plugin') requestPlugins();
+            if (v.code === 'no-host' && S.hostInstall === 'missing') {
+                return { ok: false, reason: 'BridgeHost is not installed. Press Install host, then try again.', code: v.code };
+            }
             return { ok: false, reason: v.reason, code: v.code };
         }
         if (sel.inLane || (sel.trackId && !sel.onMainLane)) {
@@ -736,9 +746,12 @@ var ARABridge = (function (maxThis) {
         S.runnerAlive = true;
         stop(helloTask);
         S.announce = true;
-        toRunner('findplugins');
+        askHost();
         if (!isBusy()) say('Checking the host and plug-ins...');
     }
+
+    // hostinfo first: its answer (a device with the host inside) comes before the no-host error of findplugins
+    function askHost() { toRunner('hostinfo'); toRunner('findplugins'); }
 
     function requestPlugins() { if (S.runnerAlive) toRunner('findplugins'); }
 
@@ -770,8 +783,32 @@ var ARABridge = (function (maxThis) {
         S.plugins.vocalign = !!(isObj(d.vocalign) && d.vocalign.found === true);
         ui('host', 1);
         ui('plugins', S.plugins.melodyne ? 1 : 0, S.plugins.vocalign ? 1 : 0);
-        if (!isBusy() && S.announce) say('Ready. ' + pluginsLine());
+        if (!isBusy() && S.announce) {
+            say('Ready. ' + pluginsLine() + (S.hostInstall === 'update' ? ' A newer BridgeHost is part of this device: press Update host.' : ''));
+        }
         S.announce = false;
+    }
+
+    function onHostInfo(d) {
+        runnerAlive();
+        var was = S.hostInstall;
+        var st = (d.state === 'missing' || d.state === 'update' || d.state === 'ok') ? d.state : 'none';
+        S.hostInstall = st;
+        ui('hostinstall', st);
+        if (st === 'ok' && (was === 'missing' || was === 'update')) {
+            // the runner installed the host: check the plug-ins with it
+            S.announce = true;
+            if (!isBusy()) say('BridgeHost installed. Checking the plug-ins...');
+            toRunner('findplugins');
+        }
+    }
+
+    function installHost() {
+        if (isBusy()) { say('A job is running. Install the host when it is finished.'); return; }
+        if (!S.runnerAlive) { say('The Node script is not running yet. Try again in a moment.'); return; }
+        if (S.hostInstall !== 'missing' && S.hostInstall !== 'update') { say('This device has no BridgeHost to install.'); return; }
+        say('Installing BridgeHost...');
+        toRunner('installhost');
     }
 
     function onStarted(d) {
@@ -814,7 +851,8 @@ var ARABridge = (function (maxThis) {
             (j.phase === 'launching' && (d.jobId === undefined || d.jobId === null) &&
                 (d.code === 'bad-payload' || d.code === 'internal')));
         if (ours) {
-            if (d.code === 'no-host') finishJob('BridgeHost is not installed. Run tools/install_host.sh, then try again.');
+            if (d.code === 'no-host') finishJob(S.hostInstall === 'missing' ? 'BridgeHost is not installed. Press Install host, then try again.'
+                : 'BridgeHost is not installed. Run tools/install_host.sh, then try again.');
             else if (d.code === 'busy' && j.phase === 'launching' && j.busyWindowOpen && !j.busyRetried) {
                 j.busyRetried = true;
                 S.retryFor = j.id;
@@ -827,9 +865,11 @@ var ARABridge = (function (maxThis) {
             return;
         }
         log('runner error ' + d.code + ': ' + d.message);
+        if (d.code === 'install-failed') { say('Could not install BridgeHost: ' + String(d.message || '')); return; }
         if (!isBusy() && S.announce && (d.code === 'no-host' || d.code === 'findplugins-failed')) {
             S.announce = false;
-            if (d.code === 'no-host') say('BridgeHost is not installed. Run tools/install_host.sh, then press Refresh.');
+            if (d.code === 'no-host') say(S.hostInstall === 'missing' ? 'BridgeHost is not installed. Press Install host.'
+                : 'BridgeHost is not installed. Run tools/install_host.sh, then press Refresh.');
             else say('Could not check the plug-ins: ' + String(d.message || ''));
         }
     }
@@ -1806,13 +1846,13 @@ var ARABridge = (function (maxThis) {
         S.ready = true;
         if (!isBusy()) say('Starting...');
         if (!S.runnerAlive) startHello();
-        else { S.announce = true; toRunner('findplugins'); }
+        else { S.announce = true; askHost(); }
     }
     function refreshPlugins() {
         if (!S.runnerAlive) { startHello(); return; }
         if (!isBusy()) say('Checking the host and plug-ins...');
         S.announce = true;
-        toRunner('findplugins');
+        askHost();
     }
     function loadbang() {
         setBusy(false);
@@ -1829,6 +1869,7 @@ var ARABridge = (function (maxThis) {
         if (S.plugins.melodyne !== null || S.plugins.vocalign !== null) {
             ui('plugins', S.plugins.melodyne ? 1 : 0, S.plugins.vocalign ? 1 : 0);
         }
+        if (S.hostInstall !== null) ui('hostinstall', S.hostInstall);
         ui('guide', S.guide ? 1 : 0);
         ui('cancel', S.cancelable ? 1 : 0);
         ui('busy', isBusy() ? 1 : 0);
@@ -1850,6 +1891,8 @@ var ARABridge = (function (maxThis) {
         hostStatus: function (args) { var d = payloadOf('hostStatus', args); if (d) onStatus(d); },
         hostError: function (args) { var d = payloadOf('hostError', args); if (d) onError(d); },
         hostPlugins: function (args) { var d = payloadOf('hostPlugins', args); if (d) onPlugins(d); },
+        hostInfo: function (args) { var d = payloadOf('hostInfo', args); if (d) onHostInfo(d); },
+        installHost: function () { installHost(); },
         hostCopied: function (args) { var d = payloadOf('hostCopied', args); if (d) onCopied(d); },
         hostPong: function () { runnerAlive(); },
         nodeLifecycle: function (args) { nodeLifecycle(args); },
@@ -1921,6 +1964,8 @@ function hostDone() { ARABridge.handle('hostDone', arguments); }
 function hostStatus() { ARABridge.handle('hostStatus', arguments); }
 function hostError() { ARABridge.handle('hostError', arguments); }
 function hostPlugins() { ARABridge.handle('hostPlugins', arguments); }
+function hostInfo() { ARABridge.handle('hostInfo', arguments); }
+function installHost() { ARABridge.handle('installHost', arguments); }
 function hostCopied() { ARABridge.handle('hostCopied', arguments); }
 function hostPong() { ARABridge.handle('hostPong', arguments); }
 function nodeLifecycle() { ARABridge.handle('nodeLifecycle', arguments); }

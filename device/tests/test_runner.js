@@ -127,7 +127,7 @@ function readJson(f) { return JSON.parse(fs.readFileSync(f, 'utf8')); }
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test('autostart under a stubbed max-api: seven handlers, ping -> pong, nothing written', async () => {
+test('autostart under a stubbed max-api: nine handlers, ping -> pong, nothing written', async () => {
   const handlers = {};
   const calls = [];
   const stub = { addHandler: (n, f) => { handlers[n] = f; }, outlet: (...a) => { calls.push(a); }, post: () => {} };
@@ -145,7 +145,7 @@ test('autostart under a stubbed max-api: seven handlers, ping -> pong, nothing w
     process.listeners('uncaughtException').filter((l) => !before.ue.includes(l)).forEach((l) => process.removeListener('uncaughtException', l));
     process.listeners('unhandledRejection').filter((l) => !before.ur.includes(l)).forEach((l) => process.removeListener('unhandledRejection', l));
   }
-  assert.deepStrictEqual(Object.keys(handlers).sort(), ['cancel', 'copyresult', 'findplugins', 'launch', 'ping', 'status', 'transport']);
+  assert.deepStrictEqual(Object.keys(handlers).sort(), ['cancel', 'copyresult', 'findplugins', 'hostinfo', 'installhost', 'launch', 'ping', 'status', 'transport']);
   handlers.ping();
   assert.deepStrictEqual(calls, [['pong']]);
   handlers.status();
@@ -179,6 +179,64 @@ test('no-host: error with install hint, no job folder created', async () => {
   assert.ok(fx.all('error')[1].data.message.includes('does-not-exist'));
   fx.send('findplugins');
   assert.strictEqual(fx.all('error')[2].data.code, 'no-host');
+});
+
+test('embedded host: hostinfo says none/missing/update/ok; installhost copies it atomically with mode 755 and then resolveHost finds it', async () => {
+  // a device without an embedded host (install.sh builds): state none, installhost refuses
+  const none = makeFixture();
+  none.send('hostinfo');
+  assert.deepStrictEqual(none.all('hostinfo')[0].data, { embedded: false, installed: false, state: 'none', installedPath: none.runner.paths.installedHost });
+  none.send('installhost');
+  assert.strictEqual(none.all('error')[0].data.code, 'install-failed');
+  assert.ok(!fs.existsSync(none.runner.paths.installedHost));
+
+  const emb = path.join(TMP, 'embedded-host');
+  fs.writeFileSync(emb, '#!/bin/sh\necho "BridgeHost test one"\n'); fs.chmodSync(emb, 0o644);   // Max's unzip may or may not keep the mode
+  const cleared = [];
+  const fx = makeFixture({ opts: { embeddedHost: emb, clearQuarantine: (f) => cleared.push(path.basename(f)) } });
+  fx.send('hostinfo');
+  assert.strictEqual(fx.all('hostinfo')[0].data.state, 'missing');
+  assert.strictEqual(fx.runner.resolveHost(null), null);
+  fx.send('installhost');
+  const inst = fx.runner.paths.installedHost;
+  assert.strictEqual(fx.all('hostinfo').length, 2);
+  assert.strictEqual(fx.all('hostinfo')[1].data.state, 'ok');
+  assert.strictEqual(fs.statSync(inst).mode & 0o777, 0o755);
+  assert.strictEqual(fs.readFileSync(inst, 'utf8'), fs.readFileSync(emb, 'utf8'));
+  assert.deepStrictEqual(cleared, ['BridgeHost.part'], 'the quarantine flag is cleared on the copy before the rename');
+  assert.ok(!fs.existsSync(inst + '.part'), 'no .part left behind');
+  assert.strictEqual(fx.runner.resolveHost(null), inst);
+  assert.strictEqual(cp.spawnSync(inst, [], { encoding: 'utf8' }).stdout.trim(), 'BridgeHost test one');
+  // a newer embedded host: update, and installing again replaces it
+  fs.writeFileSync(emb, '#!/bin/sh\necho "BridgeHost test two"\n');
+  fx.send('hostinfo');
+  assert.strictEqual(fx.all('hostinfo')[2].data.state, 'update');
+  fx.send('installhost');
+  assert.strictEqual(fx.all('hostinfo')[3].data.state, 'ok');
+  assert.strictEqual(cp.spawnSync(inst, [], { encoding: 'utf8' }).stdout.trim(), 'BridgeHost test two');
+  assert.strictEqual(fx.all('error').length, 0);
+});
+
+test('installhost: refused while a job runs; a failing copy reports install-failed and leaves the old host alone', async () => {
+  const slow = fakeHost('slow-host', 'setInterval(() => {}, 1000);');
+  const emb = path.join(TMP, 'embedded-host2');
+  fs.writeFileSync(emb, 'new');
+  const fx = makeFixture({ opts: { embeddedHost: emb } });
+  fx.launch(jobFor('melodyne'), 'window', slow);
+  const st = await fx.started(); await fx.ready(st);
+  fx.send('installhost');
+  assert.strictEqual(fx.all('error').slice(-1)[0].data.code, 'busy');
+  assert.ok(!fs.existsSync(fx.runner.paths.installedHost));
+  fx.send('cancel');
+  await fx.waitSel('done');
+  // bin/ is a file: mkdir fails
+  fs.mkdirSync(path.dirname(path.dirname(fx.runner.paths.installedHost)), { recursive: true });
+  fs.writeFileSync(path.dirname(fx.runner.paths.installedHost), 'not a folder');
+  const before = fx.all('error').length;
+  fx.send('installhost');
+  const e = fx.all('error')[before];
+  assert.strictEqual(e.data.code, 'install-failed');
+  assert.ok(/Cannot install BridgeHost/.test(e.data.message), e.data.message);
 });
 
 test('host resolution: settings hostPath, then the installed copy', async () => {

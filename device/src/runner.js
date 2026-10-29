@@ -11,6 +11,10 @@
 //   findplugins        runs `<host> --find-plugins` and relays its JSON
 //   copyresult <p>     copy a finished result.wav to the results folder (classic js cannot copy binary files)
 //   ping               replies `pong`
+//   hostinfo           replies `hostinfo` (see below)
+//   installhost        copies the BridgeHost that is embedded in a single-file device (<script folder>/BridgeHost,
+//                      unpacked there by Max) to <ARABridge>/bin/BridgeHost (atomic: .part file, chmod 755, rename),
+//                      then replies `hostinfo`; error codes busy (a job runs), install-failed
 // Messages out (maxApi.outlet(selector, payload): the selector is the first atom, the payload ONE symbol):
 //   started <p>  {jobId, jobDir, pid, mode, hostPath, startedAt}
 //   done <p>     {jobDir, jobId, resultJson (object|null), resultParseError?, exitCode, signal, running, hostLogTail,
@@ -22,6 +26,10 @@
 //                spawn-failed, findplugins-failed, copy-failed, copy-exists, internal
 //   copied <p>   {ok: true, jobId, to, bytes}              (answer to copyresult)
 //   pong
+//   hostinfo <p>  {embedded, installed, state: 'none'|'missing'|'update'|'ok', installedPath}
+//                 none = this device carries no BridgeHost (a build that is installed by install.sh / install_host.sh);
+//                 missing = embedded but not installed; update = installed copy differs from the embedded one (bytes);
+//                 ok = identical. Answer to hostinfo and to a successful installhost.
 //   Every payload is kept below ~30000 encoded characters (Max symbols are limited to 32767 bytes); see fit().
 //   `done`.resultJson is slimmed: no `diagnostics`, `realign.shifts` replaced by `realign.shiftCount`.
 //   copyresult <p>  {jobId, from?, to}  copies <jobs>/<jobId>/result.wav to <ARABridge>/results/<name>.wav (never
@@ -36,6 +44,7 @@ const nodeFs = require('fs');
 const nodePath = require('path');
 const nodeOs = require('os');
 const nodeCp = require('child_process');
+const nodeCrypto = require('crypto');
 
 const JOB_ID_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
 const LOG_TAIL_BYTES = 2000;
@@ -138,6 +147,8 @@ function createRunner(opts) {
   const jobsDir = nodePath.join(supportDir, 'jobs');
   const settingsFile = nodePath.join(supportDir, 'settings.json');
   const installedHost = nodePath.join(supportDir, 'bin', 'BridgeHost');
+  // A single-file device is frozen with the host next to the scripts: Max unpacks it into the folder of this script.
+  const embeddedHost = opts.embeddedHost !== undefined ? opts.embeddedHost : nodePath.join(__dirname, 'BridgeHost');
 
   const timers = new Set();   // every timer/interval of the runner (dispose clears them)
   // Busy rule: busy = a launched job whose result has not been reported yet. Once `done` was sent the job is DONE
@@ -208,6 +219,50 @@ function createRunner(opts) {
     const what = override ? 'The BridgeHost binary "' + override + '" is not an executable file.'
       : 'BridgeHost is not installed (looked for ' + installedHost + ' and a hostPath in ' + settingsFile + ').';
     return { code: 'no-host', message: what + ' Run tools/install_host.sh from the ARA Bridge repository, then try again.' };
+  }
+
+  // ------------------------------------------------------------------ embedded host: info and install
+
+  function isFile(p) { try { return !!p && fs.statSync(p).isFile(); } catch (e) { return false; } }
+  function sha256(p) { return nodeCrypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'); }
+
+  function hostInfo() {
+    const embedded = isFile(embeddedHost);
+    const installed = isExecutableFile(installedHost);
+    let state = 'none';
+    if (embedded) {
+      if (!installed) state = 'missing';
+      else {
+        let same = false;
+        try { same = sha256(embeddedHost) === sha256(installedHost); } catch (e) { same = false; }
+        state = same ? 'ok' : 'update';
+      }
+    }
+    return { embedded, installed, state, installedPath: installedHost };
+  }
+
+  function onHostInfo() { send('hostinfo', hostInfo()); }
+
+  function onInstallHost() {
+    if (job) { sendError('busy', 'A job is running. Install the host when it is finished.'); return; }
+    if (!isFile(embeddedHost)) { sendError('install-failed', 'This device does not contain a BridgeHost to install.'); return; }
+    const part = installedHost + '.part';
+    try {
+      fs.mkdirSync(nodePath.dirname(installedHost), { recursive: true });
+      try { fs.unlinkSync(part); } catch (e) { /* not there */ }
+      fs.copyFileSync(embeddedHost, part);
+      fs.chmodSync(part, 0o755);
+      if (typeof opts.clearQuarantine === 'function') opts.clearQuarantine(part);
+      else { try { nodeCp.spawnSync('xattr', ['-d', 'com.apple.quarantine', part], { stdio: 'ignore' }); } catch (e) { /* not set */ } }
+      if (sha256(part) !== sha256(embeddedHost)) throw new Error('the copy differs from the embedded file');
+      fs.renameSync(part, installedHost);   // atomic: a host that is still running keeps its old file
+    } catch (e) {
+      try { fs.unlinkSync(part); } catch (e2) { /* not there */ }
+      sendError('install-failed', 'Cannot install BridgeHost: ' + errStr(e));
+      return;
+    }
+    log('installed ' + embeddedHost + ' -> ' + installedHost);
+    send('hostinfo', hostInfo());
   }
 
   // ------------------------------------------------------------------ host.log tail
@@ -619,7 +674,7 @@ function createRunner(opts) {
   }
 
   const handlers = { launch: onLaunch, cancel: onCancel, status: onStatus, findplugins: onFindPlugins, ping: onPing,
-    copyresult: onCopyResult, transport: onTransport };
+    copyresult: onCopyResult, transport: onTransport, hostinfo: onHostInfo, installhost: onInstallHost };
 
   // Every handler is wrapped: nothing may throw into Max, and a returned promise is caught as well.
   function wrap(name, fn) {
@@ -655,7 +710,7 @@ function createRunner(opts) {
   return {
     handlers: wrapped, register, dispose,
     resolveHost, headlessBudget,
-    paths: { supportDir, jobsDir, settingsFile, installedHost, resultsDir },
+    paths: { supportDir, jobsDir, settingsFile, installedHost, resultsDir, embeddedHost },
     isBusy: () => job !== null,
   };
 }

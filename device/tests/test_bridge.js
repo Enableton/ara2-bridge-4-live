@@ -419,7 +419,8 @@ function makeFakeRunner(fx, opts) {
   const r = { transports: [], launches: [], cancels: 0, statusReqs: 0, findplugins: 0, copies: [], cursor: 0, job: null,
     plugins: opts.plugins || { melodyne: { found: true, path: '/Library/Audio/Plug-Ins/VST3/Melodyne.vst3' }, vocalign: { found: true } },
     answerStatus: opts.answerStatus !== false, autoStart: opts.autoStart !== false, copyMode: opts.copyMode || 'ok',
-    noHost: !!opts.noHost, symbol: !!opts.symbol };
+    noHost: !!opts.noHost, symbol: !!opts.symbol, hostState: opts.hostState || 'none', hostinfoReqs: 0, installs: 0, installFail: !!opts.installFail };
+  if (r.hostState === 'missing') r.noHost = true;
   r.support = path.join(fx.home, 'Library', 'Application Support', 'ARABridge');
   r.send = (sel, obj) => { if (r.symbol) fx.sb[sel]('symbol', enc(obj)); else fx.sb[sel](enc(obj)); };
   r.flush = () => {
@@ -430,6 +431,18 @@ function makeFakeRunner(fx, opts) {
   function handle(m) {
     const sel = m[0];
     if (sel === 'status') { r.statusReqs++; if (r.answerStatus) r.send('hostStatus', r.job ? { state: 'running', jobId: r.job.id } : { state: 'idle' }); return; }
+    if (sel === 'hostinfo') {
+      r.hostinfoReqs++;
+      r.send('hostInfo', { embedded: r.hostState !== 'none', installed: r.hostState === 'ok' || r.hostState === 'update', state: r.hostState });
+      return;
+    }
+    if (sel === 'installhost') {
+      r.installs++;
+      if (r.installFail) { r.send('hostError', { code: 'install-failed', message: 'Cannot install BridgeHost: disk full' }); return; }
+      r.hostState = 'ok'; r.noHost = false;
+      r.send('hostInfo', { embedded: true, installed: true, state: 'ok' });
+      return;
+    }
     if (sel === 'findplugins') {
       r.findplugins++;
       if (r.noHost) r.send('hostError', { code: 'no-host', message: 'BridgeHost is not installed (looked for ...). Run tools/install_host.sh' });
@@ -650,7 +663,7 @@ const ES6_PATTERNS = [
 const es5Violations = (src) => ES6_PATTERNS.filter((p) => p[0].test(codeOnly(src))).map((p) => p[1]);
 
 const MESSAGES = ['anything', 'bang', 'cancel', 'hostCopied', 'hostDone', 'hostError', 'hostPlugins', 'hostPong', 'hostStarted',
-  'hostStatus', 'loadbang', 'nodeLifecycle', 'notifydeleted', 'placement', 'ready', 'realign', 'refreshPlugins', 'sendMelodyne', 'sendVocAlign',
+  'hostInfo', 'hostStatus', 'installHost', 'loadbang', 'nodeLifecycle', 'notifydeleted', 'placement', 'ready', 'realign', 'refreshPlugins', 'sendMelodyne', 'sendVocAlign',
   'setGuide', 'settings', 'uiRefresh'];
 
 test('built file: ES5 only, node --check, core first, the scanner works', () => {
@@ -726,6 +739,60 @@ test('uiRefresh before anything is known: settings and busy only, no host/plugin
   fx.sb.uiRefresh();
   assert.strictEqual(fx.sb.outs[0].length, 0);
   assert.deepStrictEqual(fx.sb.outs[2].map((a) => a[0]).sort(), ['busy', 'cancel', 'guide', 'setting', 'setting', 'setting', 'setting']);
+});
+
+test('single-file device: hostinfo missing -> Install host message; installHost installs, then the plug-ins are checked', () => {
+  const fx = makeFixture({ runner: { hostState: 'missing' } });
+  fx.sb.loadbang();
+  fx.sb.ready();
+  fx.pump(2100);
+  assert.strictEqual(fx.runner.hostinfoReqs, 1);
+  assert.deepStrictEqual(fx.lastUi('hostinstall'), ['missing']);
+  assert.deepStrictEqual(fx.lastUi('host'), [0]);
+  assert.strictEqual(fx.status(), 'BridgeHost is not installed. Press Install host.');
+  fx.sb.sendMelodyne(); fx.pump(0);
+  assert.strictEqual(fx.runner.launches.length, 0, 'refused before a job is built');
+  assert.strictEqual(fx.status(), 'BridgeHost is not installed. Press Install host, then try again.');
+  fx.sb.installHost();
+  fx.pump(0);
+  assert.strictEqual(fx.runner.installs, 1);
+  assert.deepStrictEqual(fx.lastUi('hostinstall'), ['ok']);
+  assert.deepStrictEqual(fx.lastUi('plugins'), [1, 1]);
+  assert.strictEqual(fx.status(), 'Ready. Melodyne: found. VocAlign: found.');
+  assert.ok(fx.statuses().indexOf('Installing BridgeHost...') >= 0 && fx.statuses().indexOf('BridgeHost installed. Checking the plug-ins...') >= 0, fx.statuses().join(' | '));
+  fx.sb.installHost(); fx.pump(0);
+  assert.strictEqual(fx.runner.installs, 1, 'nothing to install any more');
+  assert.strictEqual(fx.status(), 'This device has no BridgeHost to install.');
+});
+
+test('single-file device: update state, install failure, busy refusal; a build without an embedded host never offers it', () => {
+  const up = makeFixture({ runner: { hostState: 'update' } });
+  up.boot(); up.pump(2100);
+  assert.deepStrictEqual(up.lastUi('hostinstall'), ['update']);
+  assert.strictEqual(up.status(), 'Ready. Melodyne: found. VocAlign: found. A newer BridgeHost is part of this device: press Update host.',
+    'the old host keeps working; the ready line carries the hint');
+  up.sb.installHost(); up.pump(0);
+  assert.deepStrictEqual(up.lastUi('hostinstall'), ['ok']);
+
+  const bad = makeFixture({ runner: { hostState: 'missing', installFail: true } });
+  bad.boot(); bad.pump(2100);
+  bad.sb.installHost(); bad.pump(0);
+  assert.strictEqual(bad.status(), 'Could not install BridgeHost: Cannot install BridgeHost: disk full');
+  assert.deepStrictEqual(bad.lastUi('hostinstall'), ['missing'], 'still offered');
+
+  const none = makeFixture({ runner: { noHost: true } });
+  none.boot(); none.pump(2100);
+  assert.deepStrictEqual(none.lastUi('hostinstall'), ['none']);
+  assert.strictEqual(none.status(), 'BridgeHost is not installed. Run tools/install_host.sh, then press Refresh.');
+  none.sb.installHost(); none.pump(0);
+  assert.strictEqual(none.runner.installs, 0);
+
+  const busy = makeFixture({ runner: { hostState: 'update' } });
+  busy.boot(); busy.pump(2100);
+  busy.sb.sendMelodyne(); busy.pump(0);
+  busy.sb.installHost(); busy.pump(0);
+  assert.strictEqual(busy.runner.installs, 0);
+  assert.strictEqual(busy.status(), 'A job is running. Install the host when it is finished.');
 });
 
 test('ready: gives up after 15 probes with a message; sends are refused before ready and before the runner answers', () => {

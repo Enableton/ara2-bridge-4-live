@@ -22,9 +22,11 @@ import re
 import struct
 import subprocess
 import sys
+import io
 import tempfile
 import unittest
 import urllib.parse
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEVICE = os.path.dirname(HERE)
@@ -37,7 +39,7 @@ EXPECTED_HTML = os.path.join(DEVICE, "ui", "ara2bridge_ui.html")
 PROBE_AMXD = os.path.join(DEVICE, "probe", "ARABridgeProbe.amxd")
 EXPECTED_HEADER_HEX = "616d706604000000616161616d6574610400000000000000" + "70746368"
 ACTIONS = ["sendMelodyne", "setGuide", "sendVocAlign", "cancel", "refreshPlugins"]
-PAYLOAD_SELECTORS = ["started", "done", "status", "error", "plugins", "copied"]
+PAYLOAD_SELECTORS = ["started", "done", "status", "error", "plugins", "copied", "hostinfo"]
 
 
 def parse(data):
@@ -531,7 +533,8 @@ class AmxdTest(unittest.TestCase):
         for sel in PAYLOAD_SELECTORS:
             s = self.sim()
             s.inject("obj-node", 0, (sel, "%7B%22a%22%3A1%7D"))
-            self.assertEqual(s.js_in, [("host" + sel[0].upper() + sel[1:], "%7B%22a%22%3A1%7D")], sel)
+            want = "hostInfo" if sel == "hostinfo" else "host" + sel[0].upper() + sel[1:]
+            self.assertEqual(s.js_in, [(want, "%7B%22a%22%3A1%7D")], sel)
         s = self.sim()
         s.inject("obj-node", 0, ("pong",))
         self.assertEqual(s.js_in, [("hostPong",)])
@@ -539,7 +542,7 @@ class AmxdTest(unittest.TestCase):
         s.inject("obj-node", 0, ("unrelated", "x"))
         self.assertEqual(s.js_in, [], "unmatched node messages are dropped")
         for sel in PAYLOAD_SELECTORS:
-            self.assertIn("host" + sel[0].upper() + sel[1:], self.handlers)
+            self.assertIn("hostInfo" if sel == "hostinfo" else "host" + sel[0].upper() + sel[1:], self.handlers)
         self.assertIn("hostPong", self.handlers)
 
     def test_node_lifecycle_outlet(self):
@@ -633,6 +636,153 @@ class AmxdTest(unittest.TestCase):
         self.skip_if_built_elsewhere()
         da, _ = self.fresh_builds()
         self.assertEqual(da, self.data, "device/ARABridge.amxd is stale: run python3 device/make_amxd.py")
+
+
+class SingleFileTest(unittest.TestCase):
+    """`make_amxd.py --single --host H`: ONE .amxd that carries the scripts, the page, the licences and BridgeHost.
+    The container is parsed here independently of make_amxd.py (layout of devices frozen by Max)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.host_bytes = b"\xcf\xfa\xed\xfe fake BridgeHost for the container test " + bytes(range(256)) * 20
+        cls.host = os.path.join(cls.tmp.name, "BridgeHost")
+        with open(cls.host, "wb") as f:
+            f.write(cls.host_bytes)
+        os.chmod(cls.host, 0o755)
+        cls.out = os.path.join(cls.tmp.name, "ARABridge.amxd")
+        r = subprocess.run([sys.executable, MAKE, "--single", "--host", cls.host, cls.out],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        assert r.returncode == 0, r.stdout.decode("utf-8", "replace")
+        with open(cls.out, "rb") as f:
+            cls.data = f.read()
+        d = cls.data
+        cls.entries = []
+        cls.dlst_rel = struct.unpack(">I", d[32:36])[0]
+        j = 20 + cls.dlst_rel
+        assert d[j:j + 4] == b"dlst"
+        dlen = struct.unpack(">I", d[j + 4:j + 8])[0]
+        assert j + dlen == len(d), "dlst must end the file"
+        k = j + 8
+        while k < len(d):
+            assert d[k:k + 4] == b"dire"
+            n = struct.unpack(">I", d[k + 4:k + 8])[0]
+            ent, q = {}, k + 8
+            while q < k + n:
+                tag, l = d[q:q + 4], struct.unpack(">I", d[q + 4:q + 8])[0]
+                ent[tag.decode()] = d[q + 8:q + l]
+                q += l
+            cls.entries.append(ent)
+            k += n
+        by = {e["fnam"].rstrip(b"\0").decode(): e for e in cls.entries}
+        cls.by = by
+        js = by["ARABridge.maxpat"]
+        o, n = struct.unpack(">I", js["of32"])[0], struct.unpack(">I", js["sz32"])[0]
+        cls.payload = d[20 + o:20 + o + n]
+        cls.patcher = json.loads(cls.payload[:-2].decode("utf-8"))
+        zf = by["web_assets/zipfolder"]
+        o, n = struct.unpack(">I", zf["of32"])[0], struct.unpack(">I", zf["sz32"])[0]
+        cls.zip = zipfile.ZipFile(io.BytesIO(d[20 + o:20 + o + n]))
+        cls.zip_range = (o, n)
+        cls.p = cls.patcher["patcher"]
+        cls.boxes = {b["box"]["id"]: b["box"] for b in cls.p["boxes"]}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_header_and_layout(self):
+        d = self.data
+        self.assertEqual(d[:16].hex(), "616d70660400000061616161" + "70746368")      # ampf, 4, aaaa, ptch
+        self.assertEqual(struct.unpack("<I", d[16:20])[0], len(d) - 20)
+        self.assertEqual(d[20:24], b"mx@c")
+        self.assertEqual(struct.unpack(">II", d[24:32]), (16, 0))
+        self.assertEqual([e["type"].rstrip(b"\0") for e in self.entries], [b"JSON", b"fold"])
+
+    def test_entries_are_contiguous_and_names_are_nul_padded(self):
+        pos = 16
+        for e in self.entries:
+            self.assertEqual(struct.unpack(">I", e["of32"])[0], pos)
+            pos += struct.unpack(">I", e["sz32"])[0]
+            self.assertEqual(len(e["fnam"]) % 4, 0)
+            self.assertEqual(e["fnam"][-1:], b"\0", "a name that is a multiple of 4 long still needs its NUL, or Max unpacks nothing")
+        self.assertEqual(pos, self.dlst_rel)
+        self.assertEqual(self.payload[-2:], b"\n\x00")
+
+    def test_zip_has_the_files_modes_and_the_exact_host(self):
+        names = set(self.zip.namelist())
+        for n in ("web_assets/", "web_assets/licenses/", "web_assets/bridge.js", "web_assets/runner.js", "web_assets/ara2bridge_ui.html",
+                  "web_assets/BridgeHost", "web_assets/LICENSE", "web_assets/THIRD_PARTY_NOTICES.md", "web_assets/SOURCE.txt",
+                  "web_assets/licenses/ARA-SDK-Apache-2.0.txt", "web_assets/licenses/Steinberg-VST3-SDK-LICENSE.txt"):
+            self.assertIn(n, names)
+        self.assertEqual(self.zip.read("web_assets/BridgeHost"), self.host_bytes)
+        for zi in self.zip.infolist():
+            self.assertEqual(zi.create_system, 3, zi.filename)
+            mode = zi.external_attr >> 16
+            if zi.filename.endswith("/"):
+                self.assertEqual(mode, 0o40755, zi.filename)
+            elif zi.filename == "web_assets/BridgeHost":
+                self.assertEqual(mode, 0o100755)
+            else:
+                self.assertEqual(mode, 0o100644, zi.filename)
+        self.assertEqual(self.zip.read("web_assets/ara2bridge_ui.html"), open(EXPECTED_HTML, "rb").read())
+        self.assertEqual(self.zip.read("web_assets/runner.js"), open(EXPECTED_NODE, "rb").read())
+        self.assertEqual(self.zip.read("web_assets/LICENSE")[:20], open(os.path.join(os.path.dirname(DEVICE), "LICENSE"), "rb").read()[:20])
+        src = self.zip.read("web_assets/SOURCE.txt").decode()
+        self.assertIn("github.com/Enableton/ara2-bridge-4-live", src)
+        import hashlib
+        self.assertIn(hashlib.sha256(self.host_bytes).hexdigest(), src)
+
+    def test_bridge_js_is_the_built_file(self):
+        subprocess.run([sys.executable, os.path.join(DEVICE, "build.py")], check=True, stdout=subprocess.DEVNULL)
+        self.assertEqual(self.zip.read("web_assets/bridge.js"), open(EXPECTED_JS, "rb").read())
+
+    def test_patch_uses_plain_file_names_and_no_paths_of_this_machine(self):
+        texts = {b["id"]: b.get("text", "") for b in self.boxes.values()}
+        self.assertEqual(texts["obj-js"], "js bridge.js")
+        self.assertEqual(texts["obj-node"], "node.script runner.js @autostart 1 @watch 0")
+        self.assertEqual(texts["obj-msg-readfile"], "readfile ara2bridge_ui.html")
+        self.assertNotIn(b"/Users/", self.payload)
+        self.assertNotIn(os.path.dirname(os.path.dirname(DEVICE)).encode(), self.payload)
+        for gone in ("obj-tload", "obj-load-delay", "obj-msg-url", "obj-msg-loadstop"):
+            self.assertNotIn(gone, self.boxes)
+        self.assertEqual(self.p["dependency_cache"], [])
+        sp = self.p["project"]["searchpath"]["0"]
+        self.assertEqual(sp["projectrelativepath"], "./web_assets")
+        self.assertEqual(self.p["project"]["amxdtype"], 1633771873)
+        self.assertEqual(self.p["devicewidth"], 800.0)
+
+    def test_message_flow_is_the_same_as_the_unfrozen_build(self):
+        s = Sim(self.patcher)
+        s.inject("obj-thisdev", 0, ("bang",))
+        self.assertEqual(s.web_in[0], ("readfile", "ara2bridge_ui.html"))
+        self.assertEqual(s.js_in, [("settings", "placement", 0), ("ready",)])
+        for msg in ACTIONS:
+            s = Sim(self.patcher)
+            s.inject("obj-web", 0, ("ui_action", msg))
+            self.assertEqual(s.js_in, [(msg,)], msg)
+        s = Sim(self.patcher)
+        s.inject("obj-web", 0, ("ui_loaded",))
+        self.assertEqual(s.js_in, [("uiRefresh",)])
+        s = Sim(self.patcher)
+        s.inject("obj-node", 0, ("hostinfo", "%7B%7D"))
+        self.assertEqual(s.js_in, [("hostInfo", "%7B%7D")])
+
+    def test_build_is_deterministic(self):
+        out2 = os.path.join(self.tmp.name, "second.amxd")
+        subprocess.run([sys.executable, MAKE, "--single", "--host", self.host, out2], check=True, stdout=subprocess.DEVNULL)
+        with open(out2, "rb") as f:
+            self.assertEqual(f.read(), self.data)
+
+    def test_refuses_a_missing_or_non_executable_host(self):
+        r = subprocess.run([sys.executable, MAKE, "--single", "--host", os.path.join(self.tmp.name, "nope"), os.path.join(self.tmp.name, "x.amxd")],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertNotEqual(r.returncode, 0)
+        plain = os.path.join(self.tmp.name, "plain")
+        open(plain, "wb").write(b"x")
+        r = subprocess.run([sys.executable, MAKE, "--single", "--host", plain, os.path.join(self.tmp.name, "x.amxd")],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertNotEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":

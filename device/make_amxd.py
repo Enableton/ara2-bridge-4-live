@@ -3,6 +3,8 @@
 
     python3 device/make_amxd.py [out.amxd]      # default: device/ARABridge.amxd
     python3 device/make_amxd.py --install-root /Users/Shared/ARABridge/device out.amxd   # for a package (tools/make_package.sh)
+    python3 device/make_amxd.py --single --host /path/to/BridgeHost [out.amxd]           # ONE file, nothing else to install
+                                                                                          # (default device/ARABridge-single.amxd)
 
 Runs device/build.py first (device/build/bridge.js = src/core.js + src/bridge.js), then writes the container.
 The js, node.script and jweb objects refer to their files by ABSOLUTE path, resolved from this file's location:
@@ -44,20 +46,24 @@ the box ids):
             host, guide, setting) -> [prepend ui_state] -> jweb ONLY: never to a live.* object (greying them made a
             button fire by itself); busy and refusals are enforced in bridge.js.
 """
+import hashlib
+import io
 import json
 import os
 import struct
 import subprocess
 import sys
 import urllib.parse
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 JS_PATH = os.path.join(HERE, "build", "bridge.js")
 NODE_PATH = os.path.join(HERE, "src", "runner.js")
 HTML_PATH = os.path.join(HERE, "ui", "ara2bridge_ui.html")
+HTML_SRC = HTML_PATH
 OUT = os.path.join(HERE, "ARABridge.amxd")
 
-VERSION = "0.2.1"   # also shown in ui/ara2bridge_ui.html (test_amxd_container.py compares them)
+VERSION = "0.3.0"   # also shown in ui/ara2bridge_ui.html (test_amxd_container.py compares them)
 DEVICE_W = 800
 DEVICE_H = 169
 
@@ -140,13 +146,13 @@ def html_url():
     return "file://" + urllib.parse.quote(HTML_PATH)
 
 
-ACTIONS = ["sendMelodyne", "setGuide", "sendVocAlign", "cancel", "refreshPlugins"]
+ACTIONS = ["sendMelodyne", "setGuide", "sendVocAlign", "cancel", "refreshPlugins", "installHost"]
 # page -> max settings: <name> <live object id that owns the value>
 SETTING_TARGETS = [("placement", "obj-menu-place"), ("skip", "obj-t-norealign"), ("preview", "obj-t-preview"),
                    ("sync", "obj-t-sync")]
 
 
-def build_patch():
+def build_patch(single=False):
     p = Patch()
 
     # ---- audio passthrough
@@ -157,9 +163,11 @@ def build_patch():
     p.connect("obj-in", 1, "obj-out", 1)
 
     # ---- the two scripts (absolute paths)
-    p.newobj("obj-js", "js " + JS_PATH, [20.0, 300.0, 520.0, 22.0], numinlets=1, numoutlets=3,
-             outlettype=["", "", ""])
-    p.newobj("obj-node", "node.script " + NODE_PATH + " @autostart 1 @watch 0", [620.0, 300.0, 540.0, 22.0],
+    # single-file device: plain file names, found through the project search path of the unpacked device
+    p.newobj("obj-js", "js " + ("bridge.js" if single else JS_PATH), [20.0, 300.0, 520.0, 22.0], numinlets=1,
+             numoutlets=3, outlettype=["", "", ""])
+    p.newobj("obj-node", "node.script " + ("runner.js" if single else NODE_PATH) + " @autostart 1 @watch 0",
+             [620.0, 300.0, 540.0, 22.0],
              numinlets=1, numoutlets=2, outlettype=["", ""])
     p.connect("obj-js", 1, "obj-node", 0)
 
@@ -182,26 +190,32 @@ def build_patch():
     p.newobj("obj-tstart", "t b b b", [20.0, 200.0, 70.0, 22.0], numinlets=1, numoutlets=3,
              outlettype=["bang", "bang", "bang"])
     p.message("obj-msg-ready", "ready", [20.0, 250.0, 50.0, 22.0])
-    p.message("obj-msg-readfile", "readfile " + HTML_PATH, [160.0, 230.0, 560.0, 22.0])
+    p.message("obj-msg-readfile", "readfile " + ("ara2bridge_ui.html" if single else HTML_PATH),
+              [160.0, 230.0, 560.0, 22.0])
     p.connect("obj-thisdev", 0, "obj-defer", 0)
     p.connect("obj-defer", 0, "obj-tstart", 0)
     p.connect("obj-tstart", 0, "obj-msg-ready", 0)
     p.connect("obj-msg-ready", 0, "obj-js", 0)
     p.connect("obj-tstart", 1, "obj-menu-place", 0)
-    # Whether [jweb] resolves an absolute path in `readfile` could not be tried in Live: if the page has not said
-    # ui_loaded after LOAD_FALLBACK_MS, load it once more with a file:// URL. ui_loaded stops the timer.
-    p.newobj("obj-tload", "t b b", [160.0, 200.0, 50.0, 22.0], numinlets=1, numoutlets=2, outlettype=["bang", "bang"])
-    p.newobj("obj-load-delay", "delay %d" % LOAD_FALLBACK_MS, [260.0, 200.0, 80.0, 22.0], numinlets=2,
-             numoutlets=1, outlettype=["bang"])
-    p.message("obj-msg-loadstop", "stop", [260.0, 140.0, 40.0, 22.0])
-    p.message("obj-msg-url", "url " + html_url(), [360.0, 200.0, 560.0, 22.0])
-    p.connect("obj-tstart", 2, "obj-tload", 0)
-    p.connect("obj-tload", 1, "obj-msg-readfile", 0)
-    p.connect("obj-tload", 0, "obj-load-delay", 0)
-    p.connect("obj-msg-readfile", 0, "obj-web", 0)
-    p.connect("obj-load-delay", 0, "obj-msg-url", 0)
-    p.connect("obj-msg-url", 0, "obj-web", 0)
-    p.connect("obj-msg-loadstop", 0, "obj-load-delay", 0)
+    if single:
+        # CL1B-style: the page is found by its file name in the unpacked device folder (confirmed in Live)
+        p.connect("obj-tstart", 2, "obj-msg-readfile", 0)
+        p.connect("obj-msg-readfile", 0, "obj-web", 0)
+    else:
+        # Whether [jweb] resolves an absolute path in `readfile` could not be tried in Live: if the page has not said
+        # ui_loaded after LOAD_FALLBACK_MS, load it once more with a file:// URL. ui_loaded stops the timer.
+        p.newobj("obj-tload", "t b b", [160.0, 200.0, 50.0, 22.0], numinlets=1, numoutlets=2, outlettype=["bang", "bang"])
+        p.newobj("obj-load-delay", "delay %d" % LOAD_FALLBACK_MS, [260.0, 200.0, 80.0, 22.0], numinlets=2,
+                 numoutlets=1, outlettype=["bang"])
+        p.message("obj-msg-loadstop", "stop", [260.0, 140.0, 40.0, 22.0])
+        p.message("obj-msg-url", "url " + html_url(), [360.0, 200.0, 560.0, 22.0])
+        p.connect("obj-tstart", 2, "obj-tload", 0)
+        p.connect("obj-tload", 1, "obj-msg-readfile", 0)
+        p.connect("obj-tload", 0, "obj-load-delay", 0)
+        p.connect("obj-msg-readfile", 0, "obj-web", 0)
+        p.connect("obj-load-delay", 0, "obj-msg-url", 0)
+        p.connect("obj-msg-url", 0, "obj-web", 0)
+        p.connect("obj-msg-loadstop", 0, "obj-load-delay", 0)
 
     # ---- page -> max. jweb's outlet also says onloadstart/onloadend/url/title: only these three selectors pass.
     p.newobj("obj-route-ui", "route ui_action ui_set ui_loaded", [900.0, 240.0, 260.0, 22.0], numinlets=1,
@@ -228,7 +242,8 @@ def build_patch():
     # the page is up: ask js for everything it said before
     p.message("obj-msg-uirefresh", "uiRefresh", [1180.0, 380.0, 70.0, 22.0])
     p.connect("obj-route-ui", 2, "obj-msg-uirefresh", 0)
-    p.connect("obj-route-ui", 2, "obj-msg-loadstop", 0)
+    if not single:
+        p.connect("obj-route-ui", 2, "obj-msg-loadstop", 0)
     p.connect("obj-msg-uirefresh", 0, "obj-js", 0)
 
     # ---- settings -> js
@@ -261,7 +276,7 @@ def build_patch():
         p.connect(tap, 0, "obj-web", 0)
 
     # ---- node.script outlet 0 -> route -> prepend host* -> js
-    selectors = ["started", "done", "status", "error", "plugins", "copied", "pong"]
+    selectors = ["started", "done", "status", "error", "plugins", "copied", "hostinfo", "pong"]
     p.newobj("obj-route-node", "route " + " ".join(selectors), [620.0, 440.0, 340.0, 22.0],
              numinlets=1, numoutlets=len(selectors) + 1, outlettype=[""] * (len(selectors) + 1))
     p.connect("obj-node", 0, "obj-route-node", 0)
@@ -270,8 +285,8 @@ def build_patch():
         if sel == "pong":
             pid = p.message("obj-host-pong", "hostPong", [x, 500.0, 70.0, 22.0])
         else:
-            pid = p.newobj("obj-pre-host-" + sel, "prepend host" + sel[0].upper() + sel[1:],
-                           [x, 500.0, 100.0, 22.0])
+            msg = "hostInfo" if sel == "hostinfo" else "host" + sel[0].upper() + sel[1:]
+            pid = p.newobj("obj-pre-host-" + sel, "prepend " + msg, [x, 500.0, 100.0, 22.0])
         p.connect("obj-route-node", i, pid, 0)
         p.connect(pid, 0, "obj-js", 0)
 
@@ -295,8 +310,8 @@ def build_patch():
     return p
 
 
-def patcher_dict(p):
-    return {"patcher": {
+def patcher_dict(p, single=False):
+    d = {"patcher": {
         "fileversion": 1,
         "appversion": {"major": 9, "minor": 0, "revision": 7, "architecture": "arm64", "modernui": 1},
         "classnamespace": "box",
@@ -314,6 +329,22 @@ def patcher_dict(p):
         "dependency_cache": [],
         "latency": 0,
     }}
+    if single:
+        d["patcher"]["project"] = FROZEN_PROJECT
+        d["patcher"]["autosave"] = 0
+    return d
+
+
+# `project` block of a frozen device (as Max writes it): the folder web_assets is on the search path of the unpacked device
+FROZEN_PROJECT = {
+    "version": 1, "creationdate": 3970000000, "modificationdate": 3970000000, "viewrect": [0.0, 0.0, 300.0, 500.0],
+    "autoorganize": 0, "hideprojectwindow": 0, "showdependencies": 1, "autolocalize": 0,
+    "contents": {"patchers": {}}, "layout": {},
+    "searchpath": {"0": {"bootpath": "./web_assets", "projectrelativepath": "./web_assets", "label": "Device files",
+                         "recursive": 0, "enabled": 0, "includeincollective": 1}},
+    "detailsvisible": 0, "amxdtype": 1633771873, "readonly": 0, "devpathtype": 0, "devpath": ".", "sortmode": 0,
+    "viewmode": 0,
+}
 
 
 def container(patcher_obj):
@@ -321,6 +352,84 @@ def container(patcher_obj):
     return (b"ampf" + struct.pack("<I", 4) + b"aaaa"
             + b"meta" + struct.pack("<I", 4) + struct.pack("<I", 0)
             + b"ptch" + struct.pack("<I", len(payload)) + payload)
+
+
+def _tag(tag, val):
+    return tag + struct.pack(">I", 8 + len(val)) + val
+
+
+def _dire(typ, fnam, size, offset, flag, mdat):
+    # fnam is NUL-terminated and padded to a multiple of 4: ALWAYS at least one NUL (also when the length is a multiple
+    # of 4). Without it Max logs "unfreeze complete" but writes nothing.
+    name = fnam.encode("utf-8")
+    name += b"\0" * (4 - len(name) % 4)
+    body = (_tag(b"type", typ) + _tag(b"fnam", name) + _tag(b"sz32", struct.pack(">I", size))
+            + _tag(b"of32", struct.pack(">I", offset)) + _tag(b"vers", struct.pack(">I", 0))
+            + _tag(b"flag", struct.pack(">I", flag)) + _tag(b"mdat", struct.pack(">I", mdat)))
+    return b"dire" + struct.pack(">I", 8 + len(body)) + body
+
+
+def device_files(host_path):
+    """[(path inside web_assets, bytes, unix mode)] of the single-file device, sorted, deterministic."""
+    root = os.path.dirname(HERE)
+    files = [
+        ("bridge.js", os.path.join(HERE, "build", "bridge.js"), 0o644),
+        ("runner.js", os.path.join(HERE, "src", "runner.js"), 0o644),
+        ("ara2bridge_ui.html", HTML_SRC, 0o644),
+        ("BridgeHost", host_path, 0o755),
+        ("LICENSE", os.path.join(root, "LICENSE"), 0o644),
+        ("THIRD_PARTY_NOTICES.md", os.path.join(root, "THIRD_PARTY_NOTICES.md"), 0o644),
+    ]
+    lic = os.path.join(root, "docs", "licenses")
+    for n in sorted(os.listdir(lic)):
+        files.append(("licenses/" + n, os.path.join(lic, n), 0o644))
+    out = []
+    for name, path, mode in files:
+        if not os.path.isfile(path):
+            sys.exit("missing file for the single-file device: " + path)
+        with open(path, "rb") as f:
+            out.append((name, f.read(), mode))
+    host = dict((n, b) for n, b, _ in out)["BridgeHost"]
+    commit = "unknown"
+    try:
+        commit = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                check=True).stdout.decode().strip()
+    except Exception:
+        pass
+    src = ("ARA2 Bridge 4 Live %s: this device contains BridgeHost, built from the source code of this project.\n"
+           "Source (GNU GPL v3 or later): https://github.com/Enableton/ara2-bridge-4-live  commit %s\n"
+           "BridgeHost sha256: %s\n"
+           "License texts of the components: LICENSE, THIRD_PARTY_NOTICES.md, licenses/\n"
+           % (VERSION, commit, hashlib.sha256(host).hexdigest()))
+    out.append(("SOURCE.txt", src.encode("utf-8"), 0o644))
+    return sorted(out, key=lambda t: t[0])
+
+
+def frozen_container(patcher_obj, files):
+    """A device Max unpacks like a frozen one: patcher JSON + one zip folder `web_assets` (searched at load).
+    Layout as in devices frozen by Max (see the Max for Live notes): header, `mx@c` block, JSON, zip, `dlst`; all
+    offsets are relative to byte 20."""
+    payload = json.dumps(patcher_obj, indent=1).encode("utf-8") + b"\n\x00"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        def add(name, data, mode, is_dir=False):
+            zi = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            zi.create_system = 3                      # Unix modes are kept by Max's unzip (the host must stay executable)
+            zi.external_attr = (mode << 16) | (0x10 if is_dir else 0)
+            z.writestr(zi, data, zipfile.ZIP_STORED if is_dir else zipfile.ZIP_DEFLATED)
+        add("web_assets/", b"", 0o40755, True)
+        add("web_assets/licenses/", b"", 0o40755, True)
+        for name, data, mode in files:
+            add("web_assets/" + name, data, 0o100000 | mode)
+    zipb = buf.getvalue()
+    off_json = 16
+    off_zip = off_json + len(payload)
+    entries = (_dire(b"JSON", "ARABridge.maxpat", len(payload), off_json, 17, 3875248722)
+               + _dire(b"fold", "web_assets/zipfolder", len(zipb), off_zip, 0, 0))
+    dlst = b"dlst" + struct.pack(">I", 8 + len(entries)) + entries
+    body = (b"mx@c" + struct.pack(">I", 16) + struct.pack(">I", 0) + struct.pack(">I", off_zip + len(zipb))
+            + payload + zipb + dlst)
+    return b"ampf" + struct.pack("<I", 4) + b"aaaa" + b"ptch" + struct.pack("<I", len(body)) + body
 
 
 def run_build():
@@ -335,7 +444,16 @@ def main():
     global JS_PATH, NODE_PATH, HTML_PATH
     args = sys.argv[1:]
     install_root = None
-    if args and args[0] == "--install-root":
+    single_host = None
+    if args and args[0] == "--single":
+        # ONE file: scripts, page, licences and BridgeHost are frozen into the .amxd (Max unpacks them on load)
+        if len(args) < 3 or args[1] != "--host":
+            sys.exit("usage: make_amxd.py --single --host /path/to/BridgeHost [out.amxd]")
+        single_host = os.path.abspath(args[2])
+        args = args[3:]
+        if not os.path.isfile(single_host) or not os.access(single_host, os.X_OK):
+            sys.exit("not an executable file: " + single_host)
+    elif args and args[0] == "--install-root":
         # distribution build: the scripts are expected at <root>/bridge.js, <root>/runner.js and <root>/ara2bridge_ui.html (see tools/make_package.sh);
         # they need not exist here, so an output file is required
         if len(args) != 3 or not args[1].startswith("/"):
@@ -345,16 +463,21 @@ def main():
         NODE_PATH = install_root + "/runner.js"
         HTML_PATH = install_root + "/ara2bridge_ui.html"
         args = args[2:]
-    for pth in (JS_PATH, NODE_PATH, HTML_PATH):
-        if " " in pth:
-            sys.exit("path contains a space (would split the object box arguments): " + pth)
-    run_build()
-    if install_root is None:
+    if single_host is None:
         for pth in (JS_PATH, NODE_PATH, HTML_PATH):
-            if not os.path.isfile(pth):
-                sys.exit("missing script: " + pth)
-    data = container(patcher_dict(build_patch()))
-    out = args[0] if args else OUT
+            if " " in pth:
+                sys.exit("path contains a space (would split the object box arguments): " + pth)
+    run_build()
+    if single_host is not None:
+        data = frozen_container(patcher_dict(build_patch(single=True), single=True), device_files(single_host))
+        out = args[0] if args else os.path.join(HERE, "ARABridge-single.amxd")
+    else:
+        if install_root is None:
+            for pth in (JS_PATH, NODE_PATH, HTML_PATH):
+                if not os.path.isfile(pth):
+                    sys.exit("missing script: " + pth)
+        data = container(patcher_dict(build_patch()))
+        out = args[0] if args else OUT
     with open(out, "wb") as f:
         f.write(data)
     print("wrote %s (%d bytes)" % (out, len(data)))

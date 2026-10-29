@@ -1,8 +1,8 @@
-# ARA2 Bridge 4 Live – v0.2.1
+# ARA2 Bridge 4 Live – v0.3.0
 
 Mit diesem Max-for-Live-Gerät schickst Du einen Audio-Clip aus der **Arrangement-Ansicht** von Ableton Live an **Melodyne** oder **VocAlign**, bearbeitest ihn dort in einem eigenen Fenster (mit Wiedergabe) und bekommst das Ergebnis mit **Apply** zurück in Dein Projekt. Live selbst unterstützt ARA2 nicht; ein kleines Hilfsprogramm („BridgeHost“) übernimmt das Hosten der Plug-ins.
 
-Das ist eine frühe Version (v0.2.1). Bitte Fehler und Auffälligkeiten als GitHub-Issue melden (siehe ganz unten, „Probleme melden“).
+Das ist eine frühe Version (v0.3.0). Bitte Fehler und Auffälligkeiten als GitHub-Issue melden (siehe ganz unten, „Probleme melden“).
 
 ## Was Du brauchst
 
@@ -16,6 +16,9 @@ Das ist eine frühe Version (v0.2.1). Bitte Fehler und Auffälligkeiten als GitH
 Die Plug-ins und ihre Lizenzen bringst Du selbst mit. In diesem Paket sind **keine** Plug-ins und keine Lizenzen enthalten, und das Gerät umgeht keine Lizenzprüfung. Die VST3-Dateien liegen normalerweise in `/Library/Audio/Plug-Ins/VST3` (zum Beispiel `Melodyne.vst3`, `VocAlign6Pro.vst3`).
 
 ## Installation
+
+**Am einfachsten: die Einzeldatei.** Liegt beim Release neben dem ZIP eine Datei `ARABridge.amxd`, brauchst du nur diese: In Live auf die Audiospur mit dem Clip ziehen. Das Gerät enthält alles. Einmal oben auf **Install host** klicken; das kopiert das Host-Programm nach `~/Library/Application Support/ARABridge/bin`. Eine spätere Version zeigt **Update host**, wenn sie einen neueren Host mitbringt. Kein Terminal, kein ZIP. Der Rest dieses Abschnitts beschreibt das ZIP mit `install.sh`, das dasselbe per Kommandozeile macht.
+
 
 1. ZIP-Datei entpacken (Doppelklick). Es entsteht der Ordner `ARA2-Bridge-4-Live`.
 2. **Terminal** öffnen (Spotlight: „Terminal“).
